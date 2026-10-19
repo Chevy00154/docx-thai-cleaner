@@ -1,0 +1,69 @@
+{
+  "name": "docx-thai-cleaner",
+  "version": "1.0.0",
+  "description": "Production-grade Thai text sanitizer for .docx / OpenXML pipelines: strips leaked HTML tags, removes zero-width characters, applies NFC normalization, repairs floating vowels and tone-mark stacking order, and produces OpenXML-safe output.",
+  "keywords": [
+    "thai",
+    "thai-text",
+    "docx",
+    "openxml",
+    "ooxml",
+    "sanitizer",
+    "cleaner",
+    "unicode",
+    "nfc",
+    "normalization",
+    "zero-width",
+    "typescript",
+    "word"
+  ],
+  "author": "Chevy00154",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chevy00154/docx-thai-cleaner.git"
+  },
+  "homepage": "https://github.com/Chevy00154/docx-thai-cleaner#readme",
+  "bugs": {
+    "url": "https://github.com/Chevy00154/docx-thai-cleaner/issues"
+  },
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "docx-thai-cleaner": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm run build:esm && npm run build:cjs && node scripts/finalize-build.mjs",
+    "build:esm": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
