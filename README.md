@@ -1,5 +1,7 @@
 # docx-thai-cleaner
 
+[![CI](https://github.com/Chevy00154/docx-thai-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/Chevy00154/docx-thai-cleaner/actions/workflows/ci.yml)
+
 > Production-grade Thai text sanitizer for `.docx` / OpenXML pipelines.
 
 `docx-thai-cleaner` takes Thai text that has been mangled by real-world sources —
@@ -9,6 +11,7 @@ text that is correct and safe to write into a Word document.
 - **Zero runtime dependencies**, fully typed, tree-shakeable.
 - Ships **ESM + CJS** builds, TypeScript declarations and a small **CLI**.
 - Tested with [Vitest](https://vitest.dev/) against realistic Thai strings.
+- **GitHub Actions CI** — tests and build on Node.js 18 and 20 for every push to `main`.
 - MIT licensed.
 
 ## Why Thai text breaks in Word
@@ -21,6 +24,7 @@ text that is correct and safe to write into a Word document.
 | Floating vowel sign pushed off its consonant | `ก ัน` | `กัน` |
 | Tone mark stacked **before** the vowel | `ท่ี` | `ที่` |
 | Raw text injected into `<w:t>` | `ยอด & สว่นลด` | `ยอด &amp; สว่นลด` |
+| Lower vowel drifted off a descender consonant | `กตัญ ู` | `กตัญู` |
 
 ## Installation
 
@@ -33,13 +37,23 @@ Requires Node.js ≥ 18.
 ## Quick start
 
 ```ts
-import { cleanThaiDocxText, fixThaiFloatingVowels, sanitizeOpenXmlNodes } from 'docx-thai-cleaner';
+import {
+  cleanHtmlAndSpecialEntities,
+  cleanThaiDocxText,
+  fixThaiBottomVowels,
+  fixThaiFloatingVowels,
+  sanitizeOpenXmlNodes,
+} from 'docx-thai-cleaner';
 
 const raw = '<p>สวัสด​ีครับ</p>';
 
 const cleaned = cleanThaiDocxText(raw);        // 'สวัสดีครับ'  (tags, ZWSP, spacing gone)
 const repaired = fixThaiFloatingVowels('ท่ี');  // 'ที่'          (canonical stacking order)
 const nodeReady = sanitizeOpenXmlNodes('A & B'); // 'A &amp; B'  (safe for <w:t> / attributes)
+
+// Dedicated helpers for HTML fragments and descender vowels (ญ/ฐ):
+const plain  = cleanHtmlAndSpecialEntities('<p>&nbsp;ราคา 1,000 บาท</p>'); // 'ราคา 1,000 บาท'
+const joined = fixThaiBottomVowels('กตัญ ู');                               // 'กตัญู'
 ```
 
 ## API
@@ -66,6 +80,27 @@ cleanThaiDocxText('ก​ัน');           // => 'กัน'
 cleanThaiDocxText('น้ำ &amp; ดิน');         // => 'น้ำ & ดิน'
 ```
 
+### `cleanHtmlAndSpecialEntities(input: string): string`
+
+Stage 1b — turn an HTML fragment into plain text.
+
+- Real tags, comments, doctypes and CDATA are removed (`<p>x</p>` → `x`).
+  Escaped tags in the source are decoded to literal text, exactly as a browser
+  renders them (`&lt;b&gt;` → `<b>`).
+- Named entities (`&nbsp;`, `&amp;`, `&quot;`, `&#39;`, `&apos;` plus
+  typographic `&mdash;`, `&hellip;`, `&lsquo;`, ...) and numeric references
+  (decimal `&#39;` and hex `&#x27;`) are decoded **once** — `&amp;#39;`
+  correctly yields the literal text `&#39;`.
+- `&nbsp;`, `&#160;` and `&#xA0;` become ordinary spaces, then whitespace is
+  collapsed and trimmed.
+
+```ts
+cleanHtmlAndSpecialEntities('<p>&nbsp;ราคา&nbsp;1,000&nbsp;บาท&nbsp;&amp;&nbsp;ลด 50%</p>');
+// => 'ราคา 1,000 บาท & ลด 50%'
+
+cleanHtmlAndSpecialEntities('&lt;p&gt;ตัวอักษร&lt;/p&gt;'); // => '<p>ตัวอักษร</p>'
+```
+
 ### `fixThaiFloatingVowels(input: string): string`
 
 Stage 2 — Thai cluster repair. Three passes:
@@ -89,6 +124,30 @@ fixThaiFloatingVowels('พร ุ่งนี้ ฉ ัน จะ ไป ท �
 > **Note:** preposed vowels (`เ แ โ ใ ไ`) are never reordered. A consonant
 > directly followed by `เ` is legitimate across word boundaries
 > (`...กินเขา`), so any such rewrite would be ambiguous.
+
+### `fixThaiBottomVowels(input: string): string`
+
+Stage 2b — repair lower vowels (`ุ` U+0E38, `ู` U+0E39) under the descender
+consonants `ญ` (U+0E0D) and `ฐ` (U+0E10) — the *ตัดเชิง* (descender-cut)
+cases. In correct Thai the vowel is stored directly after its consonant and
+the font cuts the descender and shifts the vowel right, so real words such as
+`กตัญญู` pass through unchanged. Sources that fake that shift manually are
+repaired:
+
+- zero-width spacers glued between consonant and vowel (`ญ\u200Bุ` → `ญุ`),
+- vowels stored before their base (`ุญ` → `ญุ`),
+- vowels detached from their base by spaces (`กตัญ ู` → `กตัญู`),
+- scrambled stacking — the vowel lands before the tone mark, in canonical
+  order (`กตัญ ู ้` → `กตัญู้`).
+
+```ts
+fixThaiBottomVowels('กตัญ ู');    // => 'กตัญู'
+fixThaiBottomVowels('ก ต ั ญ ู'); // => 'ก ตั ญู' (upper vowels: chain fixThaiFloatingVowels)
+fixThaiBottomVowels('กตัญญู');    // => 'กตัญญู' (unchanged)
+```
+
+The repair is deliberately scoped to *bottom* vowels; chain
+`fixThaiFloatingVowels` for a complete mark repair.
 
 ### `sanitizeOpenXmlNodes(xmlString, options?): string`
 
@@ -149,6 +208,21 @@ writeFileSync('output.docx', await Packer.toBuffer(doc));
 
 `docx` escapes XML for you, so use the cleaning stages — not
 `sanitizeOpenXmlNodes` — when you go through its API.
+
+### Turn a CMS/HTML export into clean Thai text
+
+```ts
+import {
+  cleanHtmlAndSpecialEntities,
+  fixThaiBottomVowels,
+  fixThaiFloatingVowels,
+} from 'docx-thai-cleaner';
+
+const fromCms = '<p>&nbsp;เปล ี ่ยน &amp; กตัญ ู</p>';
+
+const text = fixThaiBottomVowels(fixThaiFloatingVowels(cleanHtmlAndSpecialEntities(fromCms)));
+// => 'เปลี่ยน & กตัญู'
+```
 
 ### Inject sanitized text directly into an OOXML snippet
 
@@ -211,6 +285,11 @@ base + upper vowels (ั ิ ึ ื) + lower vowels (ุ ู) + ็ + tones (�
 Everything else — preposed vowels, spacing vowels (`ำ ะ า`), word spaces and
 line breaks — is left where it belongs, so correct text is never rewritten.
 
+Descender consonants (`ญ`, `ฐ`) get the same treatment for *lower* vowels:
+`fixThaiBottomVowels` restores the canonical `consonant → vowel → tone`
+sequence (`กตัญ ู` → `กตัญู`, `กตัญ ู ้` → `กตัญู้`) and lets the font's own
+descender-cut shaping do the rest.
+
 ## Development
 
 ```bash
@@ -223,7 +302,8 @@ npm run build       # ESM -> dist/, CJS -> dist/cjs/, .d.ts, CLI finalizer
 Project layout:
 
 ```
-src/index.ts               the three sanitizer stages
+.github/workflows/ci.yml   GitHub Actions CI (Node 18 & 20)
+src/index.ts               the five sanitizer stages
 src/cli.ts                 command-line filter
 src/__tests__/cleaner.test.ts
 dist/                      build output (ESM + CJS + types)

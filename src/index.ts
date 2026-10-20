@@ -8,13 +8,18 @@
  * zero-width spaces that split syllables, and mangled sources scramble the
  * stacking order of Thai vowel signs and tone marks.
  *
- * This module exposes three composable stages:
+ * This module exposes five composable stages:
  *
  * 1. {@link cleanThaiDocxText}  — strip leaked markup, invisible characters,
  *    normalize to NFC and tidy whitespace.
- * 2. {@link fixThaiFloatingVowels} — re-attach floating combining marks and
+ * 2. {@link cleanHtmlAndSpecialEntities} — turn an HTML fragment into plain
+ *    text: remove tags and decode named/numeric entities (`&nbsp;`, `&#39;`,
+ *    ...).
+ * 3. {@link fixThaiFloatingVowels} — re-attach floating combining marks and
  *    restore the canonical Thai cluster stacking order.
- * 3. {@link sanitizeOpenXmlNodes} — produce output that is safe to inject into
+ * 4. {@link fixThaiBottomVowels} — repair lower vowels (`ุ ู`) under the
+ *    descender consonants `ญ ฐ` (the "ตัดเชิง" cases).
+ * 5. {@link sanitizeOpenXmlNodes} — produce output that is safe to inject into
  *    an OpenXML (`<w:t>` / attribute) node.
  *
  * @packageDocumentation
@@ -210,6 +215,16 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = Object.freeze({
   rsquo: '\u2019',
   ldquo: '\u201C',
   rdquo: '\u201D',
+  sect: '\u00A7',
+  para: '\u00B6',
+  deg: '\u00B0',
+  plusmn: '\u00B1',
+  times: '\u00D7',
+  divide: '\u00F7',
+  cent: '\u00A2',
+  pound: '\u00A3',
+  yen: '\u00A5',
+  euro: '\u20AC',
 });
 
 /**
@@ -218,8 +233,14 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = Object.freeze({
  * numeric character references instead of being expanded (expanding them would
  * inject raw `<`/`"` into tags and break well-formedness).
  */
-const MARKUP_ENTITY_RE =
-  /&(nbsp|ensp|emsp|thinsp|shy|hellip|mdash|ndash|middot|bull|copy|reg|trade|laquo|raquo|lsquo|rsquo|ldquo|rdquo);/gi;
+const XML_KNOWN_ENTITY_NAMES = new Set(['amp', 'lt', 'gt', 'quot', 'apos']);
+
+const MARKUP_ENTITY_RE = new RegExp(
+  `&(${Object.keys(NAMED_ENTITIES)
+    .filter((name) => !XML_KNOWN_ENTITY_NAMES.has(name))
+    .join('|')});`,
+  'gi',
+);
 
 const NAMED_OR_NUMERIC_ENTITY_RE = /&(?:([A-Za-z]+)|#(\d+)|#[xX]([0-9A-Fa-f]+));/g;
 
@@ -233,6 +254,35 @@ const THAI_MARK_RUN_RE = new RegExp(`[${THAI_MARK_CLASS}]+`, 'g');
 const ORPHAN_MARK_RE = new RegExp(`(?<![${THAI_CHAR_CLASS}])([${THAI_MARK_CLASS}]+)`, 'g');
 const MARK_BEFORE_MARK_RE = new RegExp(
   `([${THAI_CHAR_CLASS}])[^\\S\\n]+(?=[${THAI_MARK_CLASS}])`,
+  'g',
+);
+
+/**
+ * Thai consonants with a descender ("เชิง") hanging below the baseline —
+ * ญ (U+0E0D FO FAN) and ฐ (U+0E10 THO THAN). When a lower vowel follows, fonts
+ * cut the descender and shift the vowel right; corrupted sources instead try
+ * to encode that shift manually (see {@link fixThaiBottomVowels}).
+ */
+const THAI_DESCENDER_CLASS = '\\u0E0D\\u0E10';
+
+/** Lower vowels rendered beneath the base: SARA U (\u0E38) and SARA UU (\u0E39). */
+const THAI_LOWER_VOWEL_CLASS = '\\u0E38\\u0E39';
+
+/**
+ * A lower vowel stored *before* its base consonant — always a corruption,
+ * because `ุ`/`ู` are combining marks and can never stand on their own.
+ * The vowel must be unattached (start of string or preceded by a non-Thai
+ * character) and the target must be a Thai base character, never another mark:
+ * `คุณ` (base + vowel + consonant) must not be mistaken for this pattern.
+ */
+const LOWER_VOWEL_BEFORE_BASE_RE = new RegExp(
+  `(?<![${THAI_CHAR_CLASS}])([${THAI_LOWER_VOWEL_CLASS}])[\\t ]*(?![${THAI_MARK_CLASS}])([${THAI_CHAR_CLASS}])`,
+  'g',
+);
+
+/** A lower vowel detached from a descender consonant by horizontal space. */
+const DESCENDER_DETACHED_LOWER_RE = new RegExp(
+  `([${THAI_DESCENDER_CLASS}])[\\t ]+(?=[${THAI_LOWER_VOWEL_CLASS}])`,
   'g',
 );
 
@@ -342,6 +392,52 @@ export function cleanThaiDocxText(input: string): string {
   text = decodeHtmlEntities(text);
   text = removeUnsafeChars(text);
   text = text.normalize('NFC');
+  return collapseWhitespace(text);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stage 1b — cleanHtmlAndSpecialEntities                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Removes HTML markup and decodes HTML entities, returning plain text — the
+ * right first stage when the payload is a CMS/HTML fragment rather than raw
+ * text.
+ *
+ * - Real tags, comments, doctypes and CDATA are stripped (`<p>x</p>` → `x`).
+ *   Escaped tags present in the source are *decoded to literal text*, exactly
+ *   as a browser would render them (`&lt;b&gt;` → `<b>`).
+ * - Named entities (`&nbsp;`, `&amp;`, `&quot;`, `&#39;`, `&apos;` plus
+ *   typographic `&mdash;`, `&hellip;`, `&lsquo;`, ...) and numeric references
+ *   (decimal `&#39;` and hex `&#x27;`) are decoded **once** — `&amp;#39;`
+ *   correctly yields the literal text `&#39;`.
+ * - Non-breaking spaces (`&nbsp;`, `&#160;`, `&#xA0;`) become ordinary spaces,
+ *   and runs of whitespace are collapsed and trimmed.
+ *
+ * @param input - Text containing HTML fragments and/or entities.
+ * @returns The plain-text result. Returns `''` for empty input.
+ *
+ * @example
+ * ```ts
+ * cleanHtmlAndSpecialEntities('<p>ราคา&nbsp;1,000&nbsp;บาท&nbsp;&amp;&nbsp;ลด 50%</p>');
+ * // => 'ราคา 1,000 บาท & ลด 50%'
+ *
+ * cleanHtmlAndSpecialEntities('&lt;p&gt;ตัวอักษร&lt;/p&gt;');
+ * // => '<p>ตัวอักษร</p>'  (escaped tags decode to literal text)
+ * ```
+ *
+ * @remarks
+ * The decoder covers a curated set of named entities plus every valid numeric
+ * reference; unknown names are left untouched for the caller (or for
+ * {@link sanitizeOpenXmlNodes}'s escaper) to neutralize. When the result must
+ * also survive Thai mark corruption, chain {@link fixThaiFloatingVowels}.
+ */
+export function cleanHtmlAndSpecialEntities(input: string): string {
+  if (!input) return '';
+
+  let text = input.replace(HTML_TAG_RE, '');
+  text = decodeHtmlEntities(text);
+  text = text.replace(/\u00A0/g, ' ');
   return collapseWhitespace(text);
 }
 
@@ -457,6 +553,60 @@ export function fixThaiFloatingVowels(input: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Stage 2b — fixThaiBottomVowels                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Repairs lower vowels (`ุ` U+0E38, `ู` U+0E39) beneath the descender
+ * consonants `ญ` (U+0E0D) and `ฐ` (U+0E10) — the "ตัดเชิง" (descender-cut)
+ * cases.
+ *
+ * In correct Thai the vowel is stored directly after its consonant; the font
+ * then cuts the descender and shifts the vowel right (a pure OpenType glyph
+ * operation). Real words such as `กตัญญู` therefore keep the plain sequence
+ * `ญ + ู` and pass through unchanged.
+ *
+ * Sources that "cut the descender" manually produce corrupted sequences, all
+ * of which are repaired here:
+ *
+ * 1. **Zero-width shift spacers** glued between consonant and vowel
+ *    (`\u200B` used to fake the right-shift) — removed together with every
+ *    other invisible character.
+ * 2. **Vowels stored before their base** (`ุญ` → `ญุ`).
+ * 3. **Vowels detached from their base by spaces** (`กตัญ ู` → `กตัญู`).
+ * 4. **Scrambled stacking** — once marks share a cluster they are sorted into
+ *    canonical order (lower vowels → `็` → tone marks), so `ญ ู ่` becomes
+ *    `ญู่` (vowel U+0E38 has combining class 103, tones U+0E48..4B class 107).
+ *
+ * The repair is deliberately scoped to *bottom* vowels — floating upper
+ * vowels and tones are left to {@link fixThaiFloatingVowels}, which can be
+ * chained for a complete repair. Text without lower vowels (e.g. `คุณ`,
+ * `น้ำ`, `เมื่อ`) is never modified.
+ *
+ * @param input - Text that may contain corrupted lower-vowel clusters.
+ * @returns The repaired text. Returns `''` for empty input.
+ *
+ * @example
+ * ```ts
+ * fixThaiBottomVowels('กตัญ ู');          // => 'กตัญู'
+ * fixThaiBottomVowels('ญ\u200Bุ');           // => 'ญุ'
+ * fixThaiBottomVowels('กตัญ ู ้');          // => 'กตัญู่' (vowel before tone)
+ * fixThaiBottomVowels('กตัญญู');           // => 'กตัญญู' (unchanged)
+ * ```
+ */
+export function fixThaiBottomVowels(input: string): string {
+  if (!input) return '';
+
+  let text = removeUnsafeChars(input);
+  text = text.normalize('NFC');
+  text = text.replace(LOWER_VOWEL_BEFORE_BASE_RE, '$2$1');
+  text = text.replace(DESCENDER_DETACHED_LOWER_RE, '$1');
+  text = reattachSeparatedMarks(text);
+  text = reorderMarkStacks(text);
+  return text;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Stage 3 — sanitizeOpenXmlNodes                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -552,7 +702,9 @@ export function sanitizeOpenXmlNodes(xmlString: string, options: SanitizeOpenXml
 
 export const docxThaiCleaner = {
   cleanThaiDocxText,
+  cleanHtmlAndSpecialEntities,
   fixThaiFloatingVowels,
+  fixThaiBottomVowels,
   sanitizeOpenXmlNodes,
 } as const;
 

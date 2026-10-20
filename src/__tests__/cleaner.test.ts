@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { cleanThaiDocxText, fixThaiFloatingVowels, INVISIBLE_CHARS, sanitizeOpenXmlNodes } from '../index';
+import {
+  cleanHtmlAndSpecialEntities,
+  cleanThaiDocxText,
+  fixThaiBottomVowels,
+  fixThaiFloatingVowels,
+  INVISIBLE_CHARS,
+  sanitizeOpenXmlNodes,
+} from '../index';
 
 describe('cleanThaiDocxText', () => {
   describe('HTML tag stripping', () => {
@@ -258,5 +265,112 @@ describe('sanitizeOpenXmlNodes', () => {
 
   it('returns an empty string for empty input', () => {
     expect(sanitizeOpenXmlNodes('')).toBe('');
+  });
+});
+
+describe('cleanHtmlAndSpecialEntities — HTML & special entity decoding', () => {
+  it('decodes &nbsp;, &amp;, &quot;, &#39;, &lt;, &gt; and &apos;', () => {
+    expect(cleanHtmlAndSpecialEntities('&nbsp;&amp;&quot;&#39;&lt;&gt;&apos;')).toBe("&\"'<>'");
+  });
+
+  it('decodes numeric decimal and hex references (incl. Thai code points)', () => {
+    expect(cleanHtmlAndSpecialEntities('&#65;&#x42;&#3647;')).toBe('AB฿');
+    expect(cleanHtmlAndSpecialEntities('&#3616;')).toBe('ภ');
+  });
+
+  it('decodes typographic entities common in Thai web content', () => {
+    expect(cleanHtmlAndSpecialEntities('&mdash;&hellip;&lsquo;x&rsquo;&deg;&plusmn;&euro;')).toBe(
+      '—…‘x’°±€',
+    );
+  });
+
+  it('strips real tags and decodes escaped tags to literal text', () => {
+    expect(cleanHtmlAndSpecialEntities('<span class="x">สวัสดี</span> ครับ')).toBe('สวัสดี ครับ');
+    expect(cleanHtmlAndSpecialEntities('&lt;p&gt;ตัวอักษร&lt;/p&gt;')).toBe('<p>ตัวอักษร</p>');
+  });
+
+  it('removes comments and never leaks entities from attributes', () => {
+    expect(
+      cleanHtmlAndSpecialEntities('<!-- ห้ามเผยแพร่ --><a href="?a=1&amp;b=2">คลิก ที่ นี่</a>'),
+    ).toBe('คลิก ที่ นี่');
+  });
+
+  it('decodes exactly once (no double-decoding)', () => {
+    expect(cleanHtmlAndSpecialEntities('&amp;#39; &amp;amp;')).toBe('&#39; &amp;');
+  });
+
+  it('turns an HTML CMS snippet into plain text', () => {
+    expect(
+      cleanHtmlAndSpecialEntities(
+        '<div class="ข่าว">&nbsp;ราคา&nbsp;1,000&nbsp;บาท&nbsp;&amp;&nbsp;ลด 50%</div>',
+      ),
+    ).toBe('ราคา 1,000 บาท & ลด 50%');
+  });
+
+  it('leaves plain text unchanged and returns empty string for empty input', () => {
+    expect(cleanHtmlAndSpecialEntities('สวัสดีครับ')).toBe('สวัสดีครับ');
+    expect(cleanHtmlAndSpecialEntities('')).toBe('');
+  });
+});
+
+describe('fixThaiBottomVowels — สระล่างใต้ตัวอักษรมีเชิง (ญ/ฐ)', () => {
+  it('rejoins a lower vowel detached from ญ/ฐ by a space', () => {
+    expect(fixThaiBottomVowels('กตัญ ู')).toBe('กตัญู');
+    expect(fixThaiBottomVowels('ฐ \u0E38')).toBe('ฐุ');
+  });
+
+  it('removes zero-width spacers used to fake descender clearance', () => {
+    expect(fixThaiBottomVowels('ญ\u200Bุ')).toBe('ญุ');
+  });
+
+  it('moves a lower vowel stored before its base after it', () => {
+    expect(fixThaiBottomVowels('\u0E38ญ')).toBe('ญุ');
+  });
+
+  it('restacks vowel + tone into the canonical order', () => {
+    expect(fixThaiBottomVowels('กตัญ ู \u0E49')).toBe('กตัญู้');
+    expect(fixThaiBottomVowels('ญ ู \u0E48')).toBe('ญู่');
+  });
+
+  it('leaves correct descender words and ordinary text unchanged', () => {
+    expect(fixThaiBottomVowels('กตัญญู')).toBe('กตัญญู');
+    expect(fixThaiBottomVowels('คุณ')).toBe('คุณ');
+    expect(fixThaiBottomVowels('น้ำ')).toBe('น้ำ');
+    expect(fixThaiBottomVowels('เมื่อ')).toBe('เมื่อ');
+    expect(fixThaiBottomVowels('')).toBe('');
+  });
+
+  it('stays scoped to bottom vowels (upper vowels wait for fixThaiFloatingVowels)', () => {
+    expect(fixThaiBottomVowels('ก ต \u0E31 ญ ู')).toBe('ก ตั ญู');
+  });
+});
+
+describe('ข้อความไทยเชิงวิชาการยาว ๆ — long academic Thai, multi-level floating vowels', () => {
+  const academic =
+    'นักวิจัยจากมหาวิทยาลัยเชียงใหม่ ศึกษาผลกระทบของการเปลี่ยนแปลงสภาพภูมิอากาศต่อพฤติกรรมการหากินของนก ในเขตพื้นที่ชุ่มชื้นของอุทยานแห่งชาติ ช่วงฤดูหนาวที่ผ่านมา';
+
+  /** Scatters every combining mark away from its base, incl. stacked runs. */
+  const scatter = (text: string): string =>
+    text
+      .replace(/([\u0E00-\u0E7F])([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])/g, '$1 $2')
+      .replace(/([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])/g, '$1 $2');
+
+  const prepare = (input: string): string =>
+    fixThaiBottomVowels(fixThaiFloatingVowels(cleanThaiDocxText(input)));
+
+  it('repairs explicit multi-level drift', () => {
+    expect(prepare('น ักว ิจ ัย')).toBe('นักวิจัย');
+    expect(prepare('เปล ี ่ยน')).toBe('เปลี่ยน'); // upper vowel + mai ek stacked
+    expect(prepare('ช ุ ม ช ื ้น')).toBe('ชุ ม ชื้น'); // lower vowel + tone stacks
+    expect(prepare('พ ื ้น ท ี่')).toBe('พื้น ที่'); // ื+้ stacked, ี่ = ี+่
+  });
+
+  it('restores a long academic paragraph scattered at every mark boundary', () => {
+    expect(prepare(scatter(academic))).toBe(academic);
+  });
+
+  it('cleans the same paragraph delivered as HTML with entities', () => {
+    const html = `<p>&nbsp;${scatter(academic)}</p>`;
+    expect(prepare(cleanHtmlAndSpecialEntities(html))).toBe(academic);
   });
 });
