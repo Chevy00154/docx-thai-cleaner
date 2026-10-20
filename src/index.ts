@@ -8,7 +8,8 @@
  * zero-width spaces that split syllables, and mangled sources scramble the
  * stacking order of Thai vowel signs and tone marks.
  *
- * This module exposes five composable stages:
+ * This module exposes five composable stages (plus {@link decodeHtmlEntities}
+ * as a standalone utility):
  *
  * 1. {@link cleanThaiDocxText}  — strip leaked markup, invisible characters,
  *    normalize to NFC and tidy whitespace.
@@ -304,11 +305,28 @@ function removeUnsafeChars(text: string): string {
 }
 
 /**
- * Decodes the curated set of named HTML entities plus numeric references in a
- * single pass (so `&amp;lt;` correctly becomes the literal text `&lt;`).
- * Unknown named entities are left untouched for the XML escaper to neutralize.
+ * Decodes HTML entities into the characters they represent — the curated set
+ * of named entities (`&nbsp;`, `&amp;`, `&quot;`, `&lt;`, `&gt;`, `&#39;`,
+ * `&apos;` plus typographic `&mdash;`, `&hellip;`, ...) and numeric references
+ * in decimal (`&#39;`) and hex (`&#x27;`) form.
+ *
+ * Decoding runs in a **single pass** — exactly once per HTML parsing layer, as
+ * the WHATWG HTML Standard prescribes — so `&amp;#39;` correctly becomes the
+ * literal text `&#39;` instead of an apostrophe. Unknown named entities are
+ * left untouched (for {@link sanitizeOpenXmlNodes}'s escaper to neutralize).
+ *
+ * @param input - Text that may contain HTML entities.
+ * @returns The decoded text. `&nbsp;` becomes U+00A0 NO-BREAK SPACE, which
+ *   {@link cleanHtmlAndSpecialEntities} and the whitespace cleanup stages turn
+ *   into an ordinary space.
+ *
+ * @example
+ * ```ts
+ * decodeHtmlEntities('Tom &amp; Jerry &lt;3 &#65;'); // => 'Tom & Jerry <3 A'
+ * decodeHtmlEntities('&amp;#39;');                   // => '&#39;' (single decode)
+ * ```
  */
-function decodeHtmlEntities(text: string): string {
+export function decodeHtmlEntities(text: string): string {
   if (!text.includes('&')) return text;
   return text.replace(NAMED_OR_NUMERIC_ENTITY_RE, (whole, name, decimal, hex) => {
     if (name !== undefined) {
@@ -360,10 +378,13 @@ function markRank(char: string): number {
  *
  * Pipeline, in order:
  *
- * 1. **Strip leaked markup** — HTML/XML comments, CDATA, doctypes, processing
+ * 1. **Decode HTML entities** — `&nbsp;`, `&amp;`, `&#39;`, `&#x200B;`, ... are
+ *    expanded exactly once via {@link decodeHtmlEntities} (unknown names are
+ *    preserved literally).
+ * 2. **Strip leaked markup** — HTML/XML comments, CDATA, doctypes, processing
  *    instructions and tags such as `<p>`, `<span class="x">` are removed.
- * 2. **Decode HTML entities** — `&nbsp;`, `&amp;`, `&#39;`, `&#x200B;`, ... are
- *    expanded once (unknown names are preserved literally).
+ *    Because entities are decoded first, escaped markup (`&lt;b&gt;`) is also
+ *    recognized and stripped as markup.
  * 3. **Drop invisible/illegal characters** — every entry of
  *    {@link INVISIBLE_CHARS} (`\u200B`, `\u00AD`, `\uFEFF`, ZWNJ/ZWJ,
  *    bidi controls), C0/C1 controls (except tab/LF/CR), Unicode
@@ -388,8 +409,8 @@ function markRank(char: string): number {
 export function cleanThaiDocxText(input: string): string {
   if (!input) return '';
 
-  let text = input.replace(HTML_TAG_RE, '');
-  text = decodeHtmlEntities(text);
+  let text = decodeHtmlEntities(input);
+  text = text.replace(HTML_TAG_RE, '');
   text = removeUnsafeChars(text);
   text = text.normalize('NFC');
   return collapseWhitespace(text);
@@ -701,6 +722,7 @@ export function sanitizeOpenXmlNodes(xmlString: string, options: SanitizeOpenXml
 /* -------------------------------------------------------------------------- */
 
 export const docxThaiCleaner = {
+  decodeHtmlEntities,
   cleanThaiDocxText,
   cleanHtmlAndSpecialEntities,
   fixThaiFloatingVowels,

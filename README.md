@@ -1,3 +1,5 @@
+🌐 Language / ภาษา: **English** | [ภาษาไทย](README.th.md)
+
 # docx-thai-cleaner
 
 [![CI](https://github.com/Chevy00154/docx-thai-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/Chevy00154/docx-thai-cleaner/actions/workflows/ci.yml)
@@ -58,15 +60,35 @@ const joined = fixThaiBottomVowels('กตัญ ู');                         
 
 ## API
 
+### `decodeHtmlEntities(input: string): string`
+
+Standalone utility (also used internally by every cleaning stage) — decode HTML
+entities into the characters they represent, **exactly once** per WHATWG HTML
+parsing rules (`&amp;#39;` → literal `&#39;`, never double-decoded):
+
+- named entities (`&nbsp;`, `&amp;`, `&quot;`, `&lt;`, `&gt;`, `&apos;` plus
+  typographic `&mdash;`, `&hellip;`, `&lsquo;`, ...)
+- numeric references, decimal (`&#39;`) and hex (`&#x27;`)
+- unknown names are left untouched
+
+```ts
+decodeHtmlEntities('Tom &amp; Jerry &lt;3 &#65;'); // => 'Tom & Jerry <3 A'
+```
+
+`&nbsp;` decodes to a real no-break space (U+00A0); the whitespace cleanup in
+the stages below turns it into an ordinary space.
+
 ### `cleanThaiDocxText(input: string): string`
 
 Stage 1 — content cleanup. Runs, in order:
 
-1. **Strip leaked markup** — comments, CDATA, doctypes, processing instructions
-   and tags (`<p>`, `<span class="x">`, `<br/>`, ...). A mathematical `5 < 6`
-   is left alone.
-2. **Decode HTML entities** — `&nbsp;`, `&amp;`, `&#39;`, `&#x200B;`, ... are
-   expanded exactly once (unknown names are kept literally).
+1. **Decode HTML entities** — `&nbsp;`, `&amp;`, `&#39;`, `&#x200B;`, ... are
+   expanded exactly once via `decodeHtmlEntities` (unknown names are kept
+   literally).
+2. **Strip leaked markup** — comments, CDATA, doctypes, processing instructions
+   and tags (`<p>`, `<span class="x">`, `<br/>`, ...). Because entities are
+   decoded first, escaped markup (`&lt;b&gt;`) is also recognized and removed.
+   A mathematical `5 < 6` is left alone.
 3. **Drop invisible/illegal characters** — every character exported as
    `INVISIBLE_CHARS` (ZWSP, ZWNJ, ZWJ, soft hyphen, BOM, bidi controls),
    C0/C1 controls (except tab/LF/CR), Unicode non-characters and lone surrogates.

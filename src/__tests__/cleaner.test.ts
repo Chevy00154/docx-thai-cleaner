@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   cleanHtmlAndSpecialEntities,
   cleanThaiDocxText,
+  decodeHtmlEntities,
   fixThaiBottomVowels,
   fixThaiFloatingVowels,
   INVISIBLE_CHARS,
@@ -372,5 +373,48 @@ describe('ข้อความไทยเชิงวิชาการยา�
   it('cleans the same paragraph delivered as HTML with entities', () => {
     const html = `<p>&nbsp;${scatter(academic)}</p>`;
     expect(prepare(cleanHtmlAndSpecialEntities(html))).toBe(academic);
+  });
+});
+
+describe('decodeHtmlEntities — public entity decoder', () => {
+  it('decodes named entities including &nbsp;', () => {
+    expect(decodeHtmlEntities('&nbsp;&amp;&quot;&lt;&gt;&apos;')).toBe(" &\"<>'");
+  });
+
+  it('decodes numeric decimal and hex references (incl. Thai code points)', () => {
+    expect(decodeHtmlEntities('&#65;&#x42;&#3616;')).toBe('ABภ');
+  });
+
+  it('decodes exactly once (no double-decoding)', () => {
+    expect(decodeHtmlEntities('&amp;#39; &amp;amp;')).toBe('&#39; &amp;');
+  });
+
+  it('keeps unknown entities and plain text untouched', () => {
+    expect(decodeHtmlEntities('&foo; &unknown;')).toBe('&foo; &unknown;');
+    expect(decodeHtmlEntities('สวัสดีครับ')).toBe('สวัสดีครับ');
+  });
+});
+
+describe('cleanThaiDocxText — entity-first pipeline', () => {
+  it('removes escaped markup because entities are decoded before tag stripping', () => {
+    expect(cleanThaiDocxText('&lt;b&gt;หนา&lt;/b&gt;')).toBe('หนา');
+  });
+
+  it('still decodes entities, drops zero-width characters and collapses spacing', () => {
+    expect(cleanThaiDocxText('น้ำ &amp; ดิน &nbsp; ทราย')).toBe('น้ำ & ดิน ทราย');
+    expect(cleanThaiDocxText('หัวข้อ &#60; ท้ายข้อความ')).toBe('หัวข้อ < ท้ายข้อความ');
+    expect(cleanThaiDocxText('อักขระ &#x200B; ล่องหน')).toBe('อักขระ ล่องหน');
+  });
+});
+
+describe('sanitizeOpenXmlNodes — XML special characters', () => {
+  it('escapes &, <, and > so Word cannot corrupt the document', () => {
+    expect(sanitizeOpenXmlNodes('A & B < C > D')).toBe('A &amp; B &lt; C &gt; D');
+  });
+
+  it('round-trips the classic corrupted-document triggers', () => {
+    expect(sanitizeOpenXmlNodes('50% & "ส่วนลด" < พิเศษ > ด่วน')).toBe(
+      '50% &amp; &quot;ส่วนลด&quot; &lt; พิเศษ &gt; ด่วน',
+    );
   });
 });

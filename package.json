@@ -45,6 +45,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.th.md",
     "LICENSE"
   ],
   "sideEffects": false,
