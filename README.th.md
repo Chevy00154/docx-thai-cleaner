@@ -11,6 +11,7 @@
 ## คุณสมบัติเด่น
 
 - **ไม่มี runtime dependencies** ใด ๆ, พิมพ์เข้มด้วย TypeScript, tree-shakeable
+- **วินิจฉัยก่อนล้าง** — `diagnoseThaiText` รายงานปัญหาทุกชนิดที่พบ (แท็ก, zero-width, mark เพี้ยน, สระอำแยกส่วน, การเว้นวรรค `ๆ) พร้อมตัวอย่างตำแหน่งจริง
 - รองรับทั้ง **ESM + CJS**, ไฟล์ประกาศ TypeScript และ **CLI** ขนาดเล็ก
 - ผ่านการทดสอบด้วย [Vitest](https://vitest.dev/) บนข้อความไทยจริงกว่า 84 เคส
 - **CI บน GitHub Actions** — รัน test + build บน Node.js 18 และ 20 ทุกครั้งที่ push ขึ้น `main`
@@ -26,7 +27,12 @@
 | สระลอยหลุดจากพยัญชนะ | `ก ัน` | `กัน` |
 | วรรณยุกต์วางก่อนสระ | `ท่ี` | `ที่` |
 | สระล่างหลุดจากตัวอักษรมีเชิง | `กตัญ ู` | `กตัญู` |
-| ข้อความตรงฉีดเข้า `<w:t>` | `ยอด & ส่วนลด` | `ยอด &amp; ส่วนลด` |
+| สระอำถูกแยกเป็น `ํ` + `า` | `กำ` | `กำ` |
+| วรรณยุกต์ซ้ำกันในคลัสเตอร์เดียว | `ดี๊๊` | `ดี๊` |
+| คำติดกับไม้ยมก `ๆ` | `เร็วๆ` | `เร็ว ๆ` |
+
+เรียก `diagnoseThaiText` เพื่อดูรายงานปัญหา **ทั้งหมด** ในข้อความ (ดูหัวข้อ
+[วินิจฉัยข้อความ](#วินิจฉัยข้อความ-diagnosethaitext))
 
 ## การติดตั้ง
 
@@ -42,8 +48,10 @@ npm install docx-thai-cleaner
 import {
   cleanHtmlAndSpecialEntities,
   cleanThaiDocxText,
+  diagnoseThaiText,
   fixThaiBottomVowels,
   fixThaiFloatingVowels,
+  fixMaiYamokSpacing,
   sanitizeOpenXmlNodes,
 } from 'docx-thai-cleaner';
 
@@ -51,11 +59,17 @@ const raw = '<p>สวัสดี   ครับ</p>';
 
 const cleaned = cleanThaiDocxText(raw);         // 'สวัสดี ครับ' (แท็ก/ช่องว่างถูกจัดการ)
 const repaired = fixThaiFloatingVowels('ท่ี');   // 'ที่'          (ลำดับ stacking ตาม Unicode)
+const spaced   = fixMaiYamokSpacing('เร็วๆ');    // 'เร็ว ๆ'       (เว้นวรรคไม้ยมกข้างละหนึ่งช่อง)
 const nodeReady = sanitizeOpenXmlNodes('A & B'); // 'A &amp; B'   (ปลอดภัยสำหรับ <w:t>/attribute)
 
 // ฟังก์ชันเฉพาะทางสำหรับ fragment HTML และสระล่างใต้ตัวอักษรมีเชิง (ญ/ฐ):
 const plain  = cleanHtmlAndSpecialEntities('<p>&nbsp;ราคา 1,000 บาท</p>'); // 'ราคา 1,000 บาท'
 const joined = fixThaiBottomVowels('กตัญ ู');                               // 'กตัญู'
+
+// ดูว่าข้อความมีปัญหาอะไรบ้าง โดยไม่แก้ไขมัน:
+const report = diagnoseThaiText('เร็วๆ');
+console.log(report.counts.maiYamokSpacing); // 1
+console.log(report.cleaned);                // 'เร็ว ๆ'
 ```
 
 ## API Reference
@@ -65,8 +79,10 @@ const joined = fixThaiBottomVowels('กตัญ ู');                         
 | `decodeHtmlEntities(input)` | — | ถอด HTML Entities (named + numeric) ครั้งเดียว กัน double-decode |
 | `cleanThaiDocxText(input)` | 1 | ถอด entity → ตัดแท็ก HTML → ลบอักขระล่องหน → NFC → เคลียร์ช่องว่าง |
 | `cleanHtmlAndSpecialEntities(input)` | 1b | แปลง fragment HTML เป็นข้อความล้วน (ตัดแท็ก + ถอด entity + `&nbsp;` → space) |
-| `fixThaiFloatingVowels(input)` | 2 | ดึงสระ/วรรณยุกต์กลับมาติดฐาน + reorder ตามลำดับ canonical |
+| `fixThaiFloatingVowels(input)` | 2 | ซ่อมคลัสเตอร์ไทย: compose สระอำ + ติด mark กลับฐาน + reorder ลำดับ canonical |
 | `fixThaiBottomVowels(input)` | 2b | ซ่อมสระล่าง `ุ ู` ใต้ตัวอักษรมีเชิง `ญ ฐ` (เคสตัดเชิง) |
+| `fixMaiYamokSpacing(input)` | 2c | จัดระยะเว้นวรรคไม้ยมก ` ๆ ` ให้ข้างละหนึ่งช่อง |
+| `diagnoseThaiText(input)` | — | รายงานปัญหาทุกชนิดในข้อความแบบ read-only + ข้อความที่ซ่อมแล้ว |
 | `sanitizeOpenXmlNodes(input, options?)` | 3 | ทำให้ข้อความฉีดเข้า OpenXML ได้ปลอดภัย (escape `& < > " '`) |
 
 ### `decodeHtmlEntities(input: string): string`
@@ -93,11 +109,13 @@ decodeHtmlEntities('&amp;#39;');                   // => '&#39;'  (ถอดค�
 3. **ลบอักขระผิดกฎหมาย/ล่องหน** — ทุกตัวใน `INVISIBLE_CHARS` (ZWSP, ZWNJ, ZWJ, soft hyphen, BOM, bidi controls), C0/C1 controls (ยกเว้น tab/LF/CR), Unicode non-characters และ lone surrogates
 4. **Normalized Unicode แบบ NFC** — `e + U+0301` → `é`, ข้อความไทยคงที่
 5. **เคลียร์ช่องว่าง** — CRLF → LF, ช่องว่างหลายตัว → หนึ่ง space, trim บรรทัด, เว้นวรรคเกินหนึ่งบรรทัดไม่ได้
+6. **เว้นวรรคไม้ยมก (ๆ)** — ข้างละหนึ่งช่องผ่าน `fixMaiYamokSpacing` (`ดีๆ` → `ดี ๆ`, `ดีๆครับ` → `ดี ๆ ครับ`)
 
 ```ts
 cleanThaiDocxText('<p>สวัสดี   ครับ</p>'); // => 'สวัสดี ครับ'
 cleanThaiDocxText('น้ำ &amp; ดิน');         // => 'น้ำ & ดิน'
 cleanThaiDocxText('&lt;b&gt;หนา&lt;/b&gt;'); // => 'หนา'
+cleanThaiDocxText('วิ่งเร็วๆ ครับ');       // => 'วิ่งเร็ว ๆ ครับ'
 ```
 
 ### `cleanHtmlAndSpecialEntities(input: string): string`
@@ -117,11 +135,13 @@ cleanHtmlAndSpecialEntities('&lt;p&gt;ตัวอักษร&lt;/p&gt;'); // =
 
 ### `fixThaiFloatingVowels(input: string): string`
 
-สเตจ 2 — ซ่อมคลัสเตอร์ไทย สามผ่าน:
+สเตจ 2 — ซ่อมคลัสเตอร์ไทย ห้าผ่าน:
 
-1. **ติดกลับ** — สระ/วรรณยุกต์ที่ถูกเว้นวรรคแยกจากฐาน (`ก ัน` → `กัน`) หรือถูก zero-width characters แทรก (ถูก strip ก่อน)
-2. **ย้าย mark กำพร้า** ที่เสียฐานทางซ้ายไป (`ัน` → `นั`)
-3. **Reorder** ทุก mark run เข้าลำดับ stacking มาตรฐาน — สระบน → สระล่าง → ็ → วรรณยุกต์ `่ ้ ๊ ๋` → `์ ํ ๎` — ด้วย stable sort (`ท่ี` → `ที่`, `ป๊ั` → `ปั๊`)
+1. **Compose สระอำ** ที่ถูกแยกเป็นรูปสองอักขระ NIKKAHIT + SARA AA (`ํ` + `า` → `ำ`) — Unicode ไม่ compose ให้เองเพราะ U+0E33 ไม่มี canonical decomposition ดังนั้น NFC จึงปล่อยไว้ตามเดิม
+2. **ติดกลับ** — สระ/วรรณยุกต์ที่ถูกเว้นวรรคแยกจากฐาน (`ก ัน` → `กัน`) หรือถูก zero-width characters แทรก (ถูก strip ก่อน)
+3. **ย้าย mark กำพร้า** ที่เสียฐานทางซ้ายไป (`ัน` → `นั`)
+4. **ลบ mark ซ้ำ** ในคลัสเตอร์เดียว — ส่วนใหญ่คือวรรณยุกต์ซ้ำ (`ดี๊๊` → `ดี๊`)
+5. **Reorder** ทุก mark run เข้าลำดับ stacking มาตรฐาน — สระบน → สระล่าง → ็ → วรรณยุกต์ `่ ้ ๊ ๋` → `์ ํ ๎` — ด้วย stable sort (`ท่ี` → `ที่`, `ป๊ั` → `ปั๊`)
 
 ข้อความที่เขียนถูกต้องแล้วจะผ่านไปโดยไม่ถูกแก้ รวมถึงเคสยากอย่าง `เมื่อ`, `เดี๋ยว`, `กี่` และ `น้ำ` (ที่วรรณยุกต์มาก่อนตัวอักษร `ำ` ซึ่งถูกต้องตาม Unicode)
 
@@ -131,6 +151,9 @@ fixThaiFloatingVowels('พร ุ่งนี้ ฉ ัน จะ ไป ท �
 
 fixThaiFloatingVowels('ท่ี ก ับ ป ั้น');
 // => 'ที่ กับ ปั้น'
+
+fixThaiFloatingVowels('กำ');   // => 'กำ'   (ํ + า ถูก compose)
+fixThaiFloatingVowels('ดี๊๊');    // => 'ดี๊'  (วรรณยุกต์ซ้ำถูกลบ)
 ```
 
 > **หมายเหตุ:** สระนำ (`เ แ โ ใ ไ`) **ไม่มีการ reorder เด็ดขาด** เพราะพยัญชนะที่ติดกับ `เ` ตรง ๆ เป็นเคสถูกต้องข้ามคำได้ (`...กินเขา`) การเขียนใหม่จึงกำกวม
@@ -151,6 +174,75 @@ fixThaiBottomVowels('กตัญญู');    // => 'กตัญญู' (ไม
 ```
 
 การซ่อมมีขอบเขตเฉพาะ **สระล่าง** เท่านั้น — ต้องการซ่อม mark ครบทุกชนิดให้ chain กับ `fixThaiFloatingVowels`
+
+### `fixMaiYamokSpacing(input: string): string`
+
+สเตจ 2c — จัดระยะเว้นวรรคไม้ยมก (`ๆ`, U+0E46) ตามมาตรฐานราชบัณฑิตยสถาน คือ **เว้นวรรคข้างละหนึ่งช่อง**:
+
+- `ดีๆ` → `ดี ๆ` (คำติดอยู่ข้างหน้า ๆ)
+- `ดีๆครับ` → `ดี ๆ ครับ` (คำติดอยู่ข้างหลัง ๆ)
+- `ดี   ๆ` → `ดี ๆ` (ช่องว่างเกินถูกลดเหลือหนึ่ง)
+
+ไม่มีการข้ามขึ้นบรรทัดใหม่ (`ดี\nๆ` คงไว้ตามเดิม) และวรรคคงที่เดิม (`ดี ๆ.` ยังเป็น `ดี ๆ.`) ฟังก์ชันนี้ทำงานเป็นขั้นสุดท้ายของ
+`cleanThaiDocxText` ส่วน `fixThaiFloatingVowels` ไม่แตะเรื่องช่องว่าง
+
+```ts
+fixMaiYamokSpacing('ดีๆครับ');    // => 'ดี ๆ ครับ'
+fixMaiYamokSpacing('ดี   ๆครับ'); // => 'ดี ๆ ครับ'
+fixMaiYamokSpacing('ดี ๆ.');     // => 'ดี ๆ.' (ไม่เปลี่ยนแปลง)
+```
+
+### `diagnoseThaiText(input: string): ThaiCleanDiagnostic`
+
+วินิจฉัยข้อความ — ตรวจข้อความ **โดยไม่แก้ไข** แล้วส่งคืนรายงานปัญหาครบทุกชนิดที่ pipeline สามารถซ่อมได้ การตรวจทำทีละสเตจตามลำดับการซ่อม ปัญหาหนึ่งจึงไม่ถูกนับซ้ำ (`ก ัน` นับเป็น floating mark หนึ่งครั้ง ไม่ใช่ orphan mark อีกครั้ง ส่วน `ดี   ๆ` นับเป็นช่องว่างเกิน ไม่ใช่ปัญหาการเว้นวรรค ` ๆ `)
+
+```ts
+export interface ThaiCleanDiagnostic {
+  length: number;                                                       // ความยาว input (UTF-16)
+  isClean: boolean;                                                     // true เมื่อไม่พบปัญหาเลย
+  issueCount: number;                                                   //ผลรวม count ของทุกปัญหา
+  counts: Readonly<Record<ThaiDiagnosticIssueType, number>>;            // จำนวนต่อชนิดปัญหา
+  issues: readonly ThaiDiagnosticIssue[];                               // เฉพาะชนิดที่พบ
+  cleaned: string;                                                      // input หลังผ่าน pipeline ซ่อมครบ
+}
+
+export interface ThaiDiagnosticIssue {
+  type: ThaiDiagnosticIssueType;   // เช่น 'invisibleChars', 'separatedSaraAm', 'maiYamokSpacing'
+  message: string;                 // คำอธิบาย + การซ่อมแบบ human-readable
+  count: number;                   // จำนวนครั้งที่พบในข้อความทั้งหมด
+  samples: ThaiDiagnosticSample[]; // ตัวอย่างพร้อมตำแหน่งไม่เกิน 5 ตัวอย่าง
+}
+
+export interface ThaiDiagnosticSample {
+  index: number;   // ตำแหน่งของ match (UTF-16)
+  match: string;   // ข้อความที่ match (อาจเป็นอักขระล่องหน เช่น '\u200B')
+  excerpt: string; // match ในบริบท พร้อม escape อักขระล่องหน
+}
+```
+
+`ThaiDiagnosticIssueType` ครอบคลุม: `htmlEntities`, `htmlTags`, `invisibleChars`, `controlChars`, `loneSurrogates`, `duplicateWhitespace`, `needsNfc`, `separatedSaraAm`, `floatingMarks`, `orphanMarks`, `duplicateMarks`, `stackOrderViolations` และ `maiYamokSpacing`
+
+```ts
+const report = diagnoseThaiText('สวัสดี​ครับ ดีๆ กำ');
+
+report.isClean;                // => false
+report.counts.invisibleChars;  // => 1
+report.counts.maiYamokSpacing; // => 1
+report.counts.separatedSaraAm; // => 1
+
+report.issues[0].samples[0];   // => { index: 6, match: '\u200B', excerpt: 'สวัสดี[\u200B]ครับ' }
+report.cleaned;                // => 'สวัสดีครับ ดี ๆ กำ'
+```
+
+รูปแบบการใช้งานที่พบบ่อยคือบันทึก then ส่งข้อความที่ซ่อมแล้วออกไปใช้งาน:
+
+```ts
+const report = diagnoseThaiText(input);
+if (!report.isClean) {
+  console.warn('Thai cleanup:', report.issues.map((i) => `${i.type}×${i.count}`));
+}
+const output = report.cleaned; // พร้อมสำหรับ node <w:t> หรือย่อหน้าใน docx
+```
 
 ### `sanitizeOpenXmlNodes(input: string, options?): string`
 
@@ -289,7 +381,7 @@ npm run build       # ESM -> dist/, CJS -> dist/cjs/, .d.ts, CLI finalizer
 
 ```
 .github/workflows/ci.yml   CI ของ GitHub Actions (Node 18 & 20)
-src/index.ts               ฟังก์ชันหลักทั้งห้าสเตจ
+src/index.ts               ฟังก์ชันหลักทุกสเตจ + diagnoseThaiText
 src/cli.ts                 ตัวกรอง command-line
 src/__tests__/cleaner.test.ts
 dist/                      ผลลัพธ์ build (ESM + CJS + types)

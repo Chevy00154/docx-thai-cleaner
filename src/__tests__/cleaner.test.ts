@@ -4,8 +4,11 @@ import {
   cleanHtmlAndSpecialEntities,
   cleanThaiDocxText,
   decodeHtmlEntities,
+  diagnoseThaiText,
+  docxThaiCleaner,
   fixThaiBottomVowels,
   fixThaiFloatingVowels,
+  fixMaiYamokSpacing,
   INVISIBLE_CHARS,
   sanitizeOpenXmlNodes,
 } from '../index';
@@ -416,5 +419,336 @@ describe('sanitizeOpenXmlNodes — XML special characters', () => {
     expect(sanitizeOpenXmlNodes('50% & "ส่วนลด" < พิเศษ > ด่วน')).toBe(
       '50% &amp; &quot;ส่วนลด&quot; &lt; พิเศษ &gt; ด่วน',
     );
+  });
+});
+
+describe('fixThaiFloatingVowels — สระอำที่แยกส่วน (ํ + า → ำ)', () => {
+  it('composes NIKKAHIT + SARA AA into SARA AM (NFC never does this)', () => {
+    expect(fixThaiFloatingVowels('ก\u0E4D\u0E32')).toBe('ก\u0E33');
+    expect(fixThaiFloatingVowels('ม\u0E4D\u0E32')).toBe('ม\u0E33');
+  });
+
+  it('composes at the very start of the string, where the orphan pass would misplace ํ', () => {
+    expect(fixThaiFloatingVowels('\u0E4D\u0E32')).toBe('\u0E33');
+    expect(fixThaiFloatingVowels('\u0E4D\u0E32\u0E4D\u0E32')).toBe('\u0E33\u0E33');
+  });
+
+  it('composes behind a stacked tone mark', () => {
+    expect(fixThaiFloatingVowels('น\u0E49\u0E4D\u0E32')).toBe('น\u0E49\u0E33'); // น้ำ
+  });
+
+  it('composes when the pair was split off by zero-width characters', () => {
+    expect(fixThaiFloatingVowels('ก\u200B\u0E4D\u0E32')).toBe('ก\u0E33');
+  });
+
+  it('leaves real SARA AM and legitimate nikkahit words untouched', () => {
+    expect(fixThaiFloatingVowels('น\u0E49\u0E33')).toBe('น\u0E49\u0E33'); // น้ำ
+    expect(fixThaiFloatingVowels('ก\u0E23\u0E4D\u0E21')).toBe('ก\u0E23\u0E4D\u0E21'); // กรรม
+    expect(fixThaiFloatingVowels('ส\u0E4C\u0E07')).toBe('ส\u0E4C\u0E07'); // ส่ง
+  });
+
+  it('is idempotent on the composed form', () => {
+    const once = fixThaiFloatingVowels('ก\u0E4D\u0E32');
+    expect(once).toBe('ก\u0E33');
+    expect(fixThaiFloatingVowels(once)).toBe(once);
+  });
+});
+
+describe('fixThaiFloatingVowels — การลบวรรณยุกต์ซ้ำซ้อน', () => {
+  it('drops a doubled tone mark', () => {
+    expect(fixThaiFloatingVowels('ด\u0E35\u0E4A\u0E4A')).toBe('ด\u0E35\u0E4A'); // ดี๊๊ → ดี๊
+    expect(fixThaiFloatingVowels('ก\u0E48\u0E48')).toBe('ก\u0E48');
+  });
+
+  it('drops the duplicate before restacking the cluster', () => {
+    expect(fixThaiFloatingVowels('ก\u0E4A\u0E4A\u0E35')).toBe('ก\u0E35\u0E4A'); // ก๊๊ี → กี๊
+    expect(fixThaiFloatingVowels('ป\u0E48\u0E48\u0E31')).toBe('ป\u0E31\u0E48'); // ป่่ั → ปั่
+  });
+
+  it('keeps the same tone mark in two separate clusters', () => {
+    expect(fixThaiFloatingVowels('ก\u0E48ก\u0E48')).toBe('ก\u0E48ก\u0E48');
+  });
+
+  it('also drops duplicated upper and lower vowels', () => {
+    expect(fixThaiFloatingVowels('ก\u0E34\u0E34')).toBe('ก\u0E34');
+    expect(fixThaiFloatingVowels('ค\u0E38\u0E38น')).toBe('ค\u0E38น');
+  });
+
+  it('is idempotent', () => {
+    const once = fixThaiFloatingVowels('ด\u0E35\u0E4A\u0E4A');
+    expect(fixThaiFloatingVowels(once)).toBe(once);
+  });
+});
+
+describe('fixMaiYamokSpacing — การจัดระยะเว้นวรรคไม้ยมก (ๆ)', () => {
+  it('inserts one space before a word glued to ๆ', () => {
+    expect(fixMaiYamokSpacing('ดีๆ')).toBe('ดี ๆ');
+    expect(fixMaiYamokSpacing('ก็ๆ')).toBe('ก็ ๆ');
+    expect(fixMaiYamokSpacing('ดี\tๆ')).toBe('ดี ๆ');
+  });
+
+  it('inserts one space after ๆ when a word is glued behind it', () => {
+    expect(fixMaiYamokSpacing('ดี ๆครับ')).toBe('ดี ๆ ครับ');
+    expect(fixMaiYamokSpacing('ดีๆครับ')).toBe('ดี ๆ ครับ');
+    expect(fixMaiYamokSpacing('ๆดี')).toBe('ๆ ดี');
+  });
+
+  it('collapses excess spaces around ๆ', () => {
+    expect(fixMaiYamokSpacing('ดี   ๆ')).toBe('ดี ๆ');
+    expect(fixMaiYamokSpacing('ดี  ๆครับ')).toBe('ดี ๆ ครับ');
+  });
+
+  it('handles real Thai sentences', () => {
+    expect(fixMaiYamokSpacing('นักเรียนตั้งใจเรียน มากๆ')).toBe('นักเรียนตั้งใจเรียน มาก ๆ');
+    expect(fixMaiYamokSpacing('รอแป๊บเดียว เร็วๆ')).toBe('รอแป๊บเดียว เร็ว ๆ');
+    expect(fixMaiYamokSpacing('ชอบกินข้าวเหนียวๆ')).toBe('ชอบกินข้าวเหนียว ๆ');
+  });
+
+  it('never bridges line breaks', () => {
+    expect(fixMaiYamokSpacing('ดี\nๆ')).toBe('ดี\nๆ');
+    expect(fixMaiYamokSpacing('ดี ๆ\nครับ')).toBe('ดี ๆ\nครับ');
+  });
+
+  it('keeps punctuation glued to ๆ', () => {
+    expect(fixMaiYamokSpacing('ดี ๆ.')).toBe('ดี ๆ.');
+    expect(fixMaiYamokSpacing('ดีๆ...')).toBe('ดี ๆ...');
+  });
+
+  it('leaves correct spacing untouched and stays idempotent', () => {
+    expect(fixMaiYamokSpacing('ดี ๆ ครับ')).toBe('ดี ๆ ครับ');
+    expect(fixMaiYamokSpacing('อ่าน แล้ว อ่าน อีก')).toBe('อ่าน แล้ว อ่าน อีก');
+    const once = fixMaiYamokSpacing('เร็วๆครับ มากๆ');
+    expect(once).toBe('เร็ว ๆ ครับ มาก ๆ');
+    expect(fixMaiYamokSpacing(once)).toBe(once);
+  });
+
+  it('returns an empty string for empty input', () => {
+    expect(fixMaiYamokSpacing('')).toBe('');
+  });
+});
+
+describe('cleanThaiDocxText — การเว้นวรรคไม้ยมกในパイป์ไลน์', () => {
+  it('normalizes glued and over-spaced ๆ during cleaning', () => {
+    expect(cleanThaiDocxText('อากาศดีมากๆครับ')).toBe('อากาศดีมาก ๆ ครับ');
+    expect(cleanThaiDocxText('วิ่งเร็วๆ   เลย')).toBe('วิ่งเร็ว ๆ เลย');
+  });
+
+  it('keeps correct ๆ spacing and punctuation untouched', () => {
+    expect(cleanThaiDocxText('ดี ๆ ครับ')).toBe('ดี ๆ ครับ');
+    expect(cleanThaiDocxText('ดี ๆ.')).toBe('ดี ๆ.');
+    expect(cleanThaiDocxText('ยาว ๆ')).toBe('ยาว ๆ');
+  });
+
+  it('leaves spacing repair to this stage — mark repair alone does not touch it', () => {
+    expect(fixThaiFloatingVowels('ดีๆ')).toBe('ดีๆ');
+  });
+
+  it('stays idempotent with zero-width characters in the mix', () => {
+    const once = cleanThaiDocxText('  ดีๆ\u200Bครับ  ');
+    expect(once).toBe('ดี ๆ ครับ');
+    expect(cleanThaiDocxText(once)).toBe(once);
+  });
+});
+
+describe('sanitizeOpenXmlNodes — ฟีเจอร์ใหม่ในข้อความ OOXML', () => {
+  it('repairs duplicate tone marks inside text nodes', () => {
+    expect(sanitizeOpenXmlNodes('<w:t>ด\u0E35\u0E4A\u0E4A</w:t>')).toBe('<w:t>ด\u0E35\u0E4A</w:t>');
+  });
+
+  it('composes separated SARA AM inside text nodes', () => {
+    expect(sanitizeOpenXmlNodes('<w:t>ก\u0E4D\u0E32</w:t>')).toBe('<w:t>ก\u0E33</w:t>');
+  });
+});
+
+describe('diagnoseThaiText — รายงานปัญหาข้อความไทย', () => {
+  it('reports correct Thai text as clean', () => {
+    const report = diagnoseThaiText('สวัสดีครับ ดี ๆ');
+    expect(report.isClean).toBe(true);
+    expect(report.issueCount).toBe(0);
+    expect(report.issues).toEqual([]);
+    expect(report.length).toBe('สวัสดีครับ ดี ๆ'.length);
+    expect(report.cleaned).toBe('สวัสดีครับ ดี ๆ');
+    expect(Object.values(report.counts).every((count) => count === 0)).toBe(true);
+  });
+
+  it('returns an empty diagnostic for empty input', () => {
+    const report = diagnoseThaiText('');
+    expect(report.length).toBe(0);
+    expect(report.isClean).toBe(true);
+    expect(report.issueCount).toBe(0);
+    expect(report.issues).toEqual([]);
+    expect(report.cleaned).toBe('');
+  });
+
+  it('exposes a zero count for every issue category', () => {
+    const report = diagnoseThaiText('สวัสดี');
+    expect(Object.keys(report.counts).sort()).toEqual(
+      [
+        'controlChars',
+        'duplicateMarks',
+        'duplicateWhitespace',
+        'floatingMarks',
+        'htmlEntities',
+        'htmlTags',
+        'invisibleChars',
+        'loneSurrogates',
+        'maiYamokSpacing',
+        'needsNfc',
+        'orphanMarks',
+        'separatedSaraAm',
+        'stackOrderViolations',
+      ].sort(),
+    );
+  });
+
+  it('detects invisible characters with a located sample', () => {
+    const report = diagnoseThaiText('ก\u200Bัน');
+    expect(report.counts.invisibleChars).toBe(1);
+    expect(report.issueCount).toBe(1);
+    const issue = report.issues.find((entry) => entry.type === 'invisibleChars');
+    expect(issue?.message).toContain('Zero-width');
+    expect(issue?.samples).toEqual([
+      { index: 1, match: '\u200B', excerpt: 'ก[\\u200B]ัน' },
+    ]);
+    expect(report.cleaned).toBe('กัน');
+  });
+
+  it('detects control characters and lone surrogates', () => {
+    const report = diagnoseThaiText('ก\u0007ดี\uD800');
+    expect(report.counts.controlChars).toBe(1);
+    expect(report.counts.loneSurrogates).toBe(1);
+    expect(report.cleaned).toBe('กดี');
+  });
+
+  it('detects HTML tags and decodable entities', () => {
+    const report = diagnoseThaiText('<b>&nbsp;สวัสดี</b>');
+    expect(report.counts.htmlTags).toBe(2);
+    expect(report.counts.htmlEntities).toBe(1);
+    expect(report.cleaned).toBe('สวัสดี');
+  });
+
+  it('ignores unknown entities that never decode', () => {
+    expect(diagnoseThaiText('a &foo; b').counts.htmlEntities).toBe(0);
+  });
+
+  it('detects duplicate whitespace runs and trailing spaces', () => {
+    expect(diagnoseThaiText('a  b').counts.duplicateWhitespace).toBe(1);
+    expect(diagnoseThaiText('a b').counts.duplicateWhitespace).toBe(0);
+    expect(diagnoseThaiText('บรรทัด \nใหม่').counts.duplicateWhitespace).toBe(1);
+  });
+
+  it('detects text that is not in NFC form', () => {
+    const report = diagnoseThaiText('e\u0301');
+    expect(report.counts.needsNfc).toBe(1);
+    expect(report.issues[0].type).toBe('needsNfc');
+    expect(report.issues[0].samples).toEqual([]);
+    expect(report.cleaned).toBe('é');
+  });
+
+  it('detects separated SARA AM without double-counting it as an orphan mark', () => {
+    const report = diagnoseThaiText('สวัสดี\u0E4D\u0E32');
+    expect(report.counts.separatedSaraAm).toBe(1);
+    expect(report.counts.orphanMarks).toBe(0);
+    expect(report.cleaned).toBe('สวัสดี\u0E33');
+  });
+
+  it('detects a doubled tone mark exactly once', () => {
+    const report = diagnoseThaiText('ด\u0E35\u0E4A\u0E4A'); // ดี๊๊
+    expect(report.counts.duplicateMarks).toBe(1);
+    expect(report.counts.stackOrderViolations).toBe(0);
+    expect(report.issues.find((entry) => entry.type === 'duplicateMarks')?.samples[0].match).toBe(
+      '\u0E35\u0E4A\u0E4A', // the full mark run containing the duplicate
+    );
+    expect(report.cleaned).toBe('ด\u0E35\u0E4A');
+  });
+
+  it('detects scrambled stacking order', () => {
+    const report = diagnoseThaiText('ท\u0E48\u0E35'); // ท่ี
+    expect(report.counts.stackOrderViolations).toBe(1);
+    expect(report.counts.duplicateMarks).toBe(0);
+    expect(report.cleaned).toBe('ท\u0E35\u0E48'); // ที่
+  });
+
+  it('counts floating marks once — not again as orphan marks', () => {
+    const report = diagnoseThaiText('ก ัน');
+    expect(report.counts.floatingMarks).toBe(1);
+    expect(report.counts.orphanMarks).toBe(0);
+    expect(report.cleaned).toBe('กัน');
+  });
+
+  it('detects orphan marks (incl. lower vowels stored before their base)', () => {
+    const report = diagnoseThaiText('ัน');
+    expect(report.counts.orphanMarks).toBe(1);
+    expect(report.counts.floatingMarks).toBe(0);
+    expect(report.cleaned).toBe('นั');
+
+    const lowerVowel = diagnoseThaiText('\u0E38ญ');
+    expect(lowerVowel.counts.orphanMarks).toBe(1);
+    expect(lowerVowel.cleaned).toBe('ญ\u0E38');
+  });
+
+  it('detects mai-yamok spacing issues once per marker', () => {
+    const report = diagnoseThaiText('ดีๆครับ');
+    expect(report.counts.maiYamokSpacing).toBe(1);
+    expect(report.cleaned).toBe('ดี ๆ ครับ');
+    expect(diagnoseThaiText('ดี ๆ ครับ').counts.maiYamokSpacing).toBe(0);
+  });
+
+  it('treats excess whitespace before ๆ as whitespace, not as a ๆ issue', () => {
+    const report = diagnoseThaiText('ดี   ๆ');
+    expect(report.counts.duplicateWhitespace).toBe(1);
+    expect(report.counts.maiYamokSpacing).toBe(0);
+    expect(report.cleaned).toBe('ดี ๆ');
+  });
+
+  it('caps samples at five while reporting the full count', () => {
+    const report = diagnoseThaiText(`x${'\u200B'.repeat(10)}y`);
+    expect(report.counts.invisibleChars).toBe(10);
+    expect(report.issues[0].samples).toHaveLength(5);
+  });
+
+  it('reports every category at once on a realistically corrupted snippet', () => {
+    const dirty = '<p>&nbsp;ก\u0E4D\u0E32\u200Bดีๆ  ท\u0E4A\u0E4A\u0E35</p>';
+    const report = diagnoseThaiText(dirty);
+    expect(report.counts).toMatchObject({
+      htmlEntities: 1,
+      htmlTags: 2,
+      invisibleChars: 1,
+      duplicateWhitespace: 1,
+      separatedSaraAm: 1,
+      duplicateMarks: 1,
+      stackOrderViolations: 1,
+      maiYamokSpacing: 1,
+    });
+    expect(report.issueCount).toBe(9); // htmlTags contributes 2 occurrences
+    expect(report.isClean).toBe(false);
+    expect(report.issues.map((entry) => entry.type)).toEqual([
+      'htmlEntities',
+      'htmlTags',
+      'invisibleChars',
+      'duplicateWhitespace',
+      'separatedSaraAm',
+      'duplicateMarks',
+      'stackOrderViolations',
+      'maiYamokSpacing',
+    ]);
+    expect(report.cleaned).toBe('ก\u0E33ดี ๆ ท\u0E35\u0E4A');
+  });
+});
+
+describe('docxThaiCleaner — namespace export', () => {
+  it('exposes every stage, including the new ones', () => {
+    expect(docxThaiCleaner.fixMaiYamokSpacing).toBe(fixMaiYamokSpacing);
+    expect(docxThaiCleaner.diagnoseThaiText).toBe(diagnoseThaiText);
+    expect(Object.keys(docxThaiCleaner)).toEqual([
+      'decodeHtmlEntities',
+      'cleanThaiDocxText',
+      'cleanHtmlAndSpecialEntities',
+      'fixThaiFloatingVowels',
+      'fixThaiBottomVowels',
+      'fixMaiYamokSpacing',
+      'sanitizeOpenXmlNodes',
+      'diagnoseThaiText',
+    ]);
   });
 });

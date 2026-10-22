@@ -8,11 +8,11 @@
  * zero-width spaces that split syllables, and mangled sources scramble the
  * stacking order of Thai vowel signs and tone marks.
  *
- * This module exposes five composable stages (plus {@link decodeHtmlEntities}
+ * This module exposes six composable stages (plus {@link decodeHtmlEntities}
  * as a standalone utility):
  *
  * 1. {@link cleanThaiDocxText}  — strip leaked markup, invisible characters,
- *    normalize to NFC and tidy whitespace.
+ *    normalize to NFC, tidy whitespace and space ไม้ยมก (ๆ) correctly.
  * 2. {@link cleanHtmlAndSpecialEntities} — turn an HTML fragment into plain
  *    text: remove tags and decode named/numeric entities (`&nbsp;`, `&#39;`,
  *    ...).
@@ -22,6 +22,11 @@
  *    descender consonants `ญ ฐ` (the "ตัดเชิง" cases).
  * 5. {@link sanitizeOpenXmlNodes} — produce output that is safe to inject into
  *    an OpenXML (`<w:t>` / attribute) node.
+ * 6. {@link fixMaiYamokSpacing} — normalize the spacing around the
+ *    reduplication marker ไม้ยมก (ๆ) to one space on each side.
+ *
+ * {@link diagnoseThaiText} analyzes a string and reports every category of
+ * corruption these stages can repair — a read-only counterpart to the repairs.
  *
  * @packageDocumentation
  */
@@ -287,6 +292,38 @@ const DESCENDER_DETACHED_LOWER_RE = new RegExp(
   'g',
 );
 
+/**
+ * SARA AM (ำ, U+0E33) spelled as its two-part form NIKKAHIT + SARA AA
+ * (ํ + า, U+0E4D U+0E32). Unicode never recomposes this sequence on its own:
+ * U+0E33 has no canonical decomposition, so NFC/NFD/NFKC all leave the pair
+ * untouched — it must be composed explicitly.
+ */
+const SEPARATED_SARA_AM_RE = /\u0E4D\u0E32/g;
+
+/**
+ * A word glued directly to the reduplication marker ไม้ยมก (ๆ, U+0E46), e.g.
+ * `ดีๆ`. The Royal Institute convention used by this library puts one space on
+ * each side of ๆ (`ดี ๆ`). Also collapses any horizontal whitespace run
+ * between the word and ๆ.
+ */
+const YAMOK_AFTER_WORD_RE = new RegExp(`([^\\s\\u0E46])[ \\t]*\\u0E46`, 'g');
+
+/** Excess spaces between ๆ and the following word (` ๆ   ครับ` → ` ๆ ครับ`). */
+const YAMOK_SPACES_BEFORE_NEXT_RE = new RegExp(
+  `([ \\t])?(\\u0E46)[ \\t]+(?=[${THAI_CHAR_CLASS}])`,
+  'g',
+);
+
+/** A word glued directly behind ๆ (` ๆครับ` → ` ๆ ครับ`). */
+const YAMOK_GLUED_NEXT_RE = new RegExp(`(\\u0E46)(?=[${THAI_CHAR_CLASS}])`, 'g');
+
+/**
+ * Horizontal whitespace that {@link cleanThaiDocxText}'s cleanup stage
+ * collapses: runs of two or more spaces/tabs, lone tabs and spaces that trail
+ * a line.
+ */
+const WHITESPACE_ISSUE_RE = /[ \t]{2,}|\t|[ \t]+(?=\r?\n)/g;
+
 const isThaiMark = (char: string): boolean => THAI_MARK_RE.test(char);
 
 const isThaiChar = (char: string): boolean => THAI_CHAR_RE.test(char);
@@ -393,6 +430,8 @@ function markRank(char: string): number {
  *    same text compare equal.
  * 5. **Whitespace cleanup** — CRLF → LF, runs of spaces/tabs → one space,
  *    trimmed lines, at most one blank line, trimmed ends.
+ * 6. **ไม้ยมก (ๆ) spacing** — one space on each side of the reduplication
+ *    marker (`ดีๆ` → `ดี ๆ`) via {@link fixMaiYamokSpacing}.
  *
  * @param input - Raw text (HTML leaks, copy/paste artifacts and all).
  * @returns The cleaned text. Returns `''` for empty input.
@@ -413,7 +452,8 @@ export function cleanThaiDocxText(input: string): string {
   text = text.replace(HTML_TAG_RE, '');
   text = removeUnsafeChars(text);
   text = text.normalize('NFC');
-  return collapseWhitespace(text);
+  text = collapseWhitespace(text);
+  return fixMaiYamokSpacing(text);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -529,17 +569,45 @@ function reorderMarkStacks(text: string): string {
 }
 
 /**
+ * Drops marks that are duplicated inside a single cluster run — most commonly
+ * a doubled tone mark (`ดี๊๊` → `ดี๊`). Only *identical* repeats are removed
+ * (the first occurrence is kept): no cluster can ever apply the same mark
+ * twice, while the same mark in two neighbouring clusters (`ก่่ก่`) is left
+ * alone.
+ */
+function removeDuplicateMarks(text: string): string {
+  if (!text) return text;
+  return text.replace(THAI_MARK_RUN_RE, (run) => {
+    if (run.length < 2) return run;
+    const seen = new Set<string>();
+    let output = '';
+    for (const char of run) {
+      if (seen.has(char)) continue;
+      seen.add(char);
+      output += char;
+    }
+    return output;
+  });
+}
+
+/**
  * Repairs "floating" Thai vowel signs and tone marks so every cluster stacks in
  * the canonical Unicode order.
  *
- * Three repairs are applied:
+ * Five repairs are applied:
  *
- * 1. **Re-attach** combining marks that were separated from their Thai base by
+ * 1. **Compose** SARA AM (ำ, U+0E33) that was spelled as its two-part form
+ *    NIKKAHIT + SARA AA (`ํ` + `า` → `ำ`). Unicode never recomposes this
+ *    sequence by itself — U+0E33 has no canonical decomposition, so NFC
+ *    leaves the pair untouched.
+ * 2. **Re-attach** combining marks that were separated from their Thai base by
  *    spaces (`ก ัน` → `กัน`) or zero-width characters (which are stripped
  *    first).
- * 2. **Relocate orphaned marks** that lost their base to the left
+ * 3. **Relocate orphaned marks** that lost their base to the left
  *    (`ัน` → `นั`).
- * 3. **Reorder** marks within each cluster so upper/lower vowels precede
+ * 4. **Drop duplicated marks** inside a single cluster — most commonly a
+ *    doubled tone mark (`ดี๊๊` → `ดี๊`).
+ * 5. **Reorder** marks within each cluster so upper/lower vowels precede
  *    mai taikhu, which precedes tone marks, which precede thanthakhat
  *    (`ท่ี` → `ที่`, `ป๊ั` → `ปั๊`).
  *
@@ -554,6 +622,8 @@ function reorderMarkStacks(text: string): string {
  * ```ts
  * fixThaiFloatingVowels('ก ัน');    // => 'กัน'
  * fixThaiFloatingVowels('ท่ี');     // => 'ที่'
+ * fixThaiFloatingVowels('ก\u0E4D\u0E32'); // => 'กำ' (SARA AM recomposed)
+ * fixThaiFloatingVowels('ดี๊๊');    // => 'ดี๊' (duplicate tone mark dropped)
  * fixThaiFloatingVowels('สวัสดี');  // => 'สวัสดี' (unchanged)
  * ```
  *
@@ -567,8 +637,12 @@ export function fixThaiFloatingVowels(input: string): string {
 
   let text = removeUnsafeChars(input);
   text = text.normalize('NFC');
+  // The compose must run before relocateOrphanMarks: that pass would otherwise
+  // move an orphan ํ behind the following า, producing าํ instead of ำ.
+  text = text.replace(SEPARATED_SARA_AM_RE, '\u0E33');
   text = reattachSeparatedMarks(text);
   text = relocateOrphanMarks(text);
+  text = removeDuplicateMarks(text);
   text = reorderMarkStacks(text);
   return text;
 }
@@ -625,6 +699,46 @@ export function fixThaiBottomVowels(input: string): string {
   text = reattachSeparatedMarks(text);
   text = reorderMarkStacks(text);
   return text;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stage 2c — fixMaiYamokSpacing                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Normalizes spacing around the reduplication marker ไม้ยมก (ๆ, U+0E46) to the
+ * Royal Institute convention of one space on each side:
+ *
+ * - `ดีๆ` → `ดี ๆ` (word glued in front of ๆ)
+ * - `ดีๆครับ` → `ดี ๆ ครับ` (word glued behind ๆ)
+ * - `ดี   ๆ` → `ดี ๆ` (excess spaces collapsed)
+ *
+ * Line breaks are never bridged (`ดี\nๆ` is left alone) and punctuation next to
+ * ๆ keeps its place (`ดี ๆ.` stays `ดี ๆ.`). Only spaces and tabs are bridged
+ * or collapsed — chain {@link cleanThaiDocxText} first when the text may also
+ * contain exotic whitespace (`\u00A0`, ...).
+ *
+ * @param input - Text that may contain glued or over-spaced ๆ.
+ * @returns The text with normalized ๆ spacing. Returns `''` for empty input.
+ *
+ * @example
+ * ```ts
+ * fixMaiYamokSpacing('ดีๆครับ');    // => 'ดี ๆ ครับ'
+ * fixMaiYamokSpacing('ดี   ๆครับ'); // => 'ดี ๆ ครับ'
+ * fixMaiYamokSpacing('ดี ๆ.');     // => 'ดี ๆ.' (unchanged)
+ * ```
+ *
+ * @remarks
+ * Runs as the last step of {@link cleanThaiDocxText}'s pipeline.
+ * {@link fixThaiFloatingVowels} intentionally leaves spacing alone.
+ */
+export function fixMaiYamokSpacing(input: string): string {
+  if (!input) return '';
+
+  return input
+    .replace(YAMOK_AFTER_WORD_RE, '$1 \u0E46')
+    .replace(YAMOK_SPACES_BEFORE_NEXT_RE, '$1$2 ')
+    .replace(YAMOK_GLUED_NEXT_RE, '$1 ');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -718,6 +832,364 @@ export function sanitizeOpenXmlNodes(xmlString: string, options: SanitizeOpenXml
 }
 
 /* -------------------------------------------------------------------------- */
+/* Diagnostics — diagnoseThaiText                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every corruption category {@link diagnoseThaiText} detects. Each one maps to
+ * a repair in the pipeline.
+ */
+export type ThaiDiagnosticIssueType =
+  /** HTML entities (`&nbsp;`, `&#39;`, ...) — decoded by {@link cleanThaiDocxText}. */
+  | 'htmlEntities'
+  /** Leaked HTML/XML markup (`<p>`, comments, doctypes) — stripped by {@link cleanThaiDocxText}. */
+  | 'htmlTags'
+  /** Zero-width / invisible characters — removed. */
+  | 'invisibleChars'
+  /** C0/C1 control characters, illegal in XML — removed. */
+  | 'controlChars'
+  /** Unpaired UTF-16 surrogates — removed. */
+  | 'loneSurrogates'
+  /** Runs of spaces/tabs (incl. trailing spaces) — collapsed. */
+  | 'duplicateWhitespace'
+  /** Text that is not in Unicode NFC form — NFC-normalized. */
+  | 'needsNfc'
+  /** SARA AM spelled as NIKKAHIT + SARA AA (`ํ` + `า`) — composed to `ำ`. */
+  | 'separatedSaraAm'
+  /** Combining marks separated from their base by spaces — re-attached. */
+  | 'floatingMarks'
+  /** Combining marks with no base on their left — moved behind the next consonant. */
+  | 'orphanMarks'
+  /** Duplicated marks inside one cluster (e.g. a doubled tone mark) — removed. */
+  | 'duplicateMarks'
+  /** Mark runs stacked out of the canonical order (e.g. `ท่ี`) — sorted. */
+  | 'stackOrderViolations'
+  /** Missing or excess spaces around ไม้ยมก (ๆ) — normalized. */
+  | 'maiYamokSpacing';
+
+/** One located occurrence of an issue. */
+export interface ThaiDiagnosticSample {
+  /**
+   * UTF-16 index of the match. Issues detected on a repaired intermediate
+   * stage (the Thai mark repairs) report indices relative to that stage, not
+   * to the original input.
+   */
+  index: number;
+  /** The matched text itself — may be invisible (e.g. `\u200B`). */
+  match: string;
+  /**
+   * The match inside its surrounding context: the match is wrapped in `[...]`,
+   * invisible/control characters are rendered as `\uXXXX` escapes and `…`
+   * marks truncated edges.
+   */
+  excerpt: string;
+}
+
+/** A detected issue together with its occurrences. */
+export interface ThaiDiagnosticIssue {
+  /** Machine-readable category. */
+  type: ThaiDiagnosticIssueType;
+  /** Human-readable explanation of the issue and its repair. */
+  message: string;
+  /** Number of occurrences in the whole text. */
+  count: number;
+  /** The first few occurrences (up to five), earliest first. */
+  samples: ThaiDiagnosticSample[];
+}
+
+/** Report returned by {@link diagnoseThaiText}. */
+export interface ThaiCleanDiagnostic {
+  /** UTF-16 length of the input string. */
+  length: number;
+  /** `true` when no issue was found. */
+  isClean: boolean;
+  /** Sum of every issue's `count`. */
+  issueCount: number;
+  /** Occurrences per category — every category is present, `0` when not found. */
+  counts: Readonly<Record<ThaiDiagnosticIssueType, number>>;
+  /** Only the categories that were found, in detection order. */
+  issues: readonly ThaiDiagnosticIssue[];
+  /**
+   * The input after the full repair pipeline
+   * (`cleanThaiDocxText` → `fixThaiFloatingVowels` → `fixThaiBottomVowels`).
+   */
+  cleaned: string;
+}
+
+/** Number of samples attached to each detected issue. */
+const DIAGNOSTIC_SAMPLE_LIMIT = 5;
+
+/** Detection order of every {@link ThaiDiagnosticIssueType}. */
+const DIAGNOSTIC_ORDER: readonly ThaiDiagnosticIssueType[] = [
+  'htmlEntities',
+  'htmlTags',
+  'invisibleChars',
+  'controlChars',
+  'loneSurrogates',
+  'duplicateWhitespace',
+  'needsNfc',
+  'separatedSaraAm',
+  'floatingMarks',
+  'orphanMarks',
+  'duplicateMarks',
+  'stackOrderViolations',
+  'maiYamokSpacing',
+];
+
+/** Explanation per issue type. */
+const DIAGNOSTIC_MESSAGES: Readonly<Record<ThaiDiagnosticIssueType, string>> = Object.freeze({
+  htmlEntities: 'HTML entities — decoded by cleanThaiDocxText.',
+  htmlTags: 'Leaked HTML/XML markup — stripped by cleanThaiDocxText.',
+  invisibleChars: 'Zero-width/invisible characters — removed (they break Word syllable rendering).',
+  controlChars: 'Control characters that are illegal in XML — removed.',
+  loneSurrogates: 'Unpaired UTF-16 surrogates — removed.',
+  duplicateWhitespace: 'Runs of spaces/tabs (incl. trailing spaces) — collapsed to one space.',
+  needsNfc: 'Text is not in Unicode NFC form — NFC-normalized.',
+  separatedSaraAm:
+    'SARA AM spelled as NIKKAHIT + SARA AA (ํ + า); NFC never recomposes it — composed to ำ.',
+  floatingMarks: 'Combining marks separated from their base by spaces — re-attached.',
+  orphanMarks: 'Combining marks with no base on their left — moved behind the next consonant.',
+  duplicateMarks: 'Duplicated marks inside one cluster (e.g. a doubled tone mark) — removed.',
+  stackOrderViolations: 'Mark runs stacked out of canonical order (e.g. ท่ี) — sorted.',
+  maiYamokSpacing: 'Spacing around ไม้ยมก (ๆ) — normalized to one space on each side.',
+});
+
+/** A match reduced to what diagnostics need. */
+interface LocatedMatch {
+  index: number;
+  match: string;
+}
+
+const toLocated = (matches: RegExpExecArray[]): LocatedMatch[] =>
+  matches.map((match) => ({ index: match.index, match: match[0] }));
+
+/** Collects every match of `re` in `text` using a fresh, lastIndex-free clone. */
+function collectMatches(re: RegExp, text: string): RegExpExecArray[] {
+  if (!text) return [];
+  const local = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  const matches: RegExpExecArray[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = local.exec(text)) !== null) {
+    matches.push(match);
+  }
+  return matches;
+}
+
+/** Characters rendered as `\uXXXX` escapes inside diagnostic excerpts. */
+const EXCERPT_ESCAPE_RE = new RegExp(`${INVISIBLE_CLASS}|${CONTROL_CHARS_CLASS}|\\r|\\n|\\t`, 'g');
+
+/** Escapes invisible characters and line breaks so an excerpt stays one line. */
+function escapeUnprintable(text: string): string {
+  return text.replace(EXCERPT_ESCAPE_RE, (char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return `\\u${code.toString(16).toUpperCase().padStart(4, '0')}`;
+  });
+}
+
+/** Builds the excerpt of a match, wrapping the match itself in `[...]`. */
+function makeExcerpt(text: string, index: number, matchLength: number): string {
+  const CONTEXT = 16;
+  const start = Math.max(0, index - CONTEXT);
+  const end = Math.min(text.length, index + matchLength + CONTEXT);
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < text.length ? '…' : '';
+  return (
+    prefix +
+    escapeUnprintable(text.slice(start, index)) +
+    `[${escapeUnprintable(text.slice(index, index + matchLength))}]` +
+    escapeUnprintable(text.slice(index + matchLength, end)) +
+    suffix
+  );
+}
+
+/** The first {@link DIAGNOSTIC_SAMPLE_LIMIT} samples of a match list. */
+function makeSamples(text: string, matches: LocatedMatch[]): ThaiDiagnosticSample[] {
+  return matches.slice(0, DIAGNOSTIC_SAMPLE_LIMIT).map(({ index, match }) => ({
+    index,
+    match,
+    excerpt: makeExcerpt(text, index, match.length),
+  }));
+}
+
+/** Whether an entity reference decodes (mirrors {@link decodeHtmlEntities}). */
+function isDecodableEntity(match: RegExpExecArray): boolean {
+  const [, name, decimal, hex] = match;
+  if (name !== undefined) return NAMED_ENTITIES[name] !== undefined;
+  const codePoint = decimal !== undefined ? Number.parseInt(decimal, 10) : Number.parseInt(hex, 16);
+  return (
+    Number.isInteger(codePoint) &&
+    codePoint > 0 &&
+    codePoint <= 0x10ffff &&
+    !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+  );
+}
+
+/** Orphan marks with a usable base ahead — the ones the orphan pass repairs. */
+function collectRepairableOrphans(text: string): RegExpExecArray[] {
+  return collectMatches(ORPHAN_MARK_RE, text).filter((match) => {
+    const afterMarks = match.index + match[0].length;
+    const target = /^[ \t]*([\u0E00-\u0E7F])/.exec(text.slice(afterMarks));
+    return target !== null && isThaiChar(target[1]) && !isThaiMark(target[1]);
+  });
+}
+
+/** Mark runs containing duplicated marks, plus how many marks would be dropped. */
+function collectDuplicateMarkRuns(text: string): { runs: RegExpExecArray[]; removed: number } {
+  const runs: RegExpExecArray[] = [];
+  let removed = 0;
+  for (const match of collectMatches(THAI_MARK_RUN_RE, text)) {
+    const unique = new Set(match[0]).size;
+    if (unique < match[0].length) {
+      removed += match[0].length - unique;
+      runs.push(match);
+    }
+  }
+  return { runs, removed };
+}
+
+/** Mark runs whose ranks are not in non-decreasing canonical order. */
+function collectUnorderedMarkRuns(text: string): RegExpExecArray[] {
+  return collectMatches(THAI_MARK_RUN_RE, text).filter((match) => {
+    let previous = -1;
+    for (const char of match[0]) {
+      const rank = markRank(char);
+      if (rank < previous) return true;
+      previous = rank;
+    }
+    return false;
+  });
+}
+
+/** ๆ positions that are not separated from their surroundings by one space. */
+function collectMaiYamokIssues(text: string): LocatedMatch[] {
+  const issues: LocatedMatch[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '\u0E46') continue;
+    const before = index > 0 ? text[index - 1] : '';
+    const after = index + 1 < text.length ? text[index + 1] : '';
+    const gluedBefore = before !== '' && !/\s/.test(before);
+    const gluedAfter = THAI_CHAR_RE.test(after);
+    if (gluedBefore || gluedAfter) issues.push({ index, match: '\u0E46' });
+  }
+  return issues;
+}
+
+/**
+ * Analyzes text and reports every category of corruption the pipeline can
+ * repair — without modifying the input.
+ *
+ * Detection mirrors the repair pipeline stage by stage, so one defect is never
+ * reported twice: `ก ัน` counts once as a floating mark (not also as an orphan
+ * mark), `ดี   ๆ` counts as excess whitespace (not as a ไม้ยมก spacing issue)
+ * and `ํา` counts as a separated SARA AM (not as an orphan nikkahit).
+ *
+ * @param text - Raw text to analyze (HTML leaks, copy/paste artifacts and all).
+ * @returns A {@link ThaiCleanDiagnostic}: per-category occurrence counts,
+ *   located samples and the fully repaired `cleaned` text.
+ *
+ * @example
+ * ```ts
+ * const report = diagnoseThaiText('สวัสดี\u200Bครับ ดีๆ กำ');
+ * report.isClean;                // => false
+ * report.counts.invisibleChars;  // => 1
+ * report.counts.maiYamokSpacing; // => 1
+ * report.counts.separatedSaraAm; // => 1
+ * report.issues[0].samples[0];   // => { index: 6, match: '\u200B', excerpt: ... }
+ * report.cleaned;                // => 'สวัสดีครับ ดี ๆ กำ'
+ * ```
+ */
+export function diagnoseThaiText(text: string): ThaiCleanDiagnostic {
+  const counts: Record<ThaiDiagnosticIssueType, number> = {
+    htmlEntities: 0,
+    htmlTags: 0,
+    invisibleChars: 0,
+    controlChars: 0,
+    loneSurrogates: 0,
+    duplicateWhitespace: 0,
+    needsNfc: 0,
+    separatedSaraAm: 0,
+    floatingMarks: 0,
+    orphanMarks: 0,
+    duplicateMarks: 0,
+    stackOrderViolations: 0,
+    maiYamokSpacing: 0,
+  };
+  const found = new Map<ThaiDiagnosticIssueType, LocatedMatch[]>();
+  const locate = (
+    type: ThaiDiagnosticIssueType,
+    matches: LocatedMatch[],
+    count: number = matches.length,
+  ): void => {
+    if (count === 0) return;
+    counts[type] = count;
+    found.set(type, matches);
+  };
+
+  if (text) {
+    // --- Garbage measured on the raw input ---------------------------------
+    locate(
+      'htmlEntities',
+      toLocated(collectMatches(NAMED_OR_NUMERIC_ENTITY_RE, text).filter(isDecodableEntity)),
+    );
+    locate('htmlTags', toLocated(collectMatches(HTML_TAG_RE, text)));
+    locate('invisibleChars', toLocated(collectMatches(new RegExp(INVISIBLE_CLASS, 'g'), text)));
+    locate('controlChars', toLocated(collectMatches(new RegExp(CONTROL_CHARS_CLASS, 'g'), text)));
+    locate(
+      'loneSurrogates',
+      toLocated(
+        [...collectMatches(LONE_HIGH_SURROGATE_RE, text), ...collectMatches(LONE_LOW_SURROGATE_RE, text)].sort(
+          (a, b) => a.index - b.index,
+        ),
+      ),
+    );
+    locate('duplicateWhitespace', toLocated(collectMatches(WHITESPACE_ISSUE_RE, text)));
+    if (text.normalize('NFC') !== text) {
+      counts.needsNfc = 1;
+      found.set('needsNfc', []);
+    }
+
+    // --- Thai cluster issues, mirrored stage by stage ----------------------
+    let stage = removeUnsafeChars(decodeHtmlEntities(text));
+
+    locate('separatedSaraAm', toLocated(collectMatches(SEPARATED_SARA_AM_RE, stage)));
+    stage = stage.replace(SEPARATED_SARA_AM_RE, '\u0E33');
+
+    locate('floatingMarks', toLocated(collectMatches(MARK_BEFORE_MARK_RE, stage)));
+    stage = reattachSeparatedMarks(stage);
+
+    locate('orphanMarks', toLocated(collectRepairableOrphans(stage)));
+    stage = relocateOrphanMarks(stage);
+
+    const { runs: duplicateRuns, removed } = collectDuplicateMarkRuns(stage);
+    locate('duplicateMarks', toLocated(duplicateRuns), removed);
+    stage = removeDuplicateMarks(stage);
+
+    locate('stackOrderViolations', toLocated(collectUnorderedMarkRuns(stage)));
+
+    locate('maiYamokSpacing', collectMaiYamokIssues(stage));
+  }
+
+  const issues: ThaiDiagnosticIssue[] = DIAGNOSTIC_ORDER.filter((type) => counts[type] > 0).map(
+    (type) => ({
+      type,
+      message: DIAGNOSTIC_MESSAGES[type],
+      count: counts[type],
+      samples: makeSamples(text, found.get(type) ?? []),
+    }),
+  );
+  const issueCount = DIAGNOSTIC_ORDER.reduce((total, type) => total + counts[type], 0);
+
+  return {
+    length: text.length,
+    isClean: issueCount === 0,
+    issueCount,
+    counts: Object.freeze({ ...counts }),
+    issues,
+    cleaned: fixThaiBottomVowels(fixThaiFloatingVowels(cleanThaiDocxText(text))),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Exports                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -727,7 +1199,9 @@ export const docxThaiCleaner = {
   cleanHtmlAndSpecialEntities,
   fixThaiFloatingVowels,
   fixThaiBottomVowels,
+  fixMaiYamokSpacing,
   sanitizeOpenXmlNodes,
+  diagnoseThaiText,
 } as const;
 
 export default docxThaiCleaner;

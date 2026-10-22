@@ -1,6 +1,6 @@
 {
   "name": "docx-thai-cleaner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Production-grade Thai text sanitizer for .docx / OpenXML pipelines: strips leaked HTML tags, removes zero-width characters, applies NFC normalization, repairs floating vowels and tone-mark stacking order, and produces OpenXML-safe output.",
   "keywords": [
     "thai",

@@ -11,6 +11,9 @@ scraped HTML, PDF extraction, copy/paste from the web, broken OCR — and return
 text that is correct and safe to write into a Word document.
 
 - **Zero runtime dependencies**, fully typed, tree-shakeable.
+- **Diagnoses before it cleans** — `diagnoseThaiText` reports every problem it
+  finds (tags, zero-width spaces, scrambled marks, split SARA AM, `ๆ` spacing)
+  with located samples.
 - Ships **ESM + CJS** builds, TypeScript declarations and a small **CLI**.
 - Tested with [Vitest](https://vitest.dev/) against realistic Thai strings.
 - **GitHub Actions CI** — tests and build on Node.js 18 and 20 for every push to `main`.
@@ -27,6 +30,12 @@ text that is correct and safe to write into a Word document.
 | Tone mark stacked **before** the vowel | `ท่ี` | `ที่` |
 | Raw text injected into `<w:t>` | `ยอด & สว่นลด` | `ยอด &amp; สว่นลด` |
 | Lower vowel drifted off a descender consonant | `กตัญ ู` | `กตัญู` |
+| SARA AM split into `ํ` + `า` | `กำ` | `กำ` |
+| Duplicated tone mark in one cluster | `ดี๊๊` | `ดี๊` |
+| Word glued to ไม้ยมก `ๆ` | `เร็วๆ` | `เร็ว ๆ` |
+
+Run `diagnoseThaiText` to get a full report of **every** problem found (see
+[Diagnosing a string](#diagnosing-a-string-diagnosethaitext)).
 
 ## Installation
 
@@ -42,8 +51,10 @@ Requires Node.js ≥ 18.
 import {
   cleanHtmlAndSpecialEntities,
   cleanThaiDocxText,
+  diagnoseThaiText,
   fixThaiBottomVowels,
   fixThaiFloatingVowels,
+  fixMaiYamokSpacing,
   sanitizeOpenXmlNodes,
 } from 'docx-thai-cleaner';
 
@@ -51,11 +62,17 @@ const raw = '<p>สวัสด​ีครับ</p>';
 
 const cleaned = cleanThaiDocxText(raw);        // 'สวัสดีครับ'  (tags, ZWSP, spacing gone)
 const repaired = fixThaiFloatingVowels('ท่ี');  // 'ที่'          (canonical stacking order)
+const spaced  = fixMaiYamokSpacing('เร็วๆ');    // 'เร็ว ๆ'       (one space each side of ๆ)
 const nodeReady = sanitizeOpenXmlNodes('A & B'); // 'A &amp; B'  (safe for <w:t> / attributes)
 
 // Dedicated helpers for HTML fragments and descender vowels (ญ/ฐ):
 const plain  = cleanHtmlAndSpecialEntities('<p>&nbsp;ราคา 1,000 บาท</p>'); // 'ราคา 1,000 บาท'
 const joined = fixThaiBottomVowels('กตัญ ู');                               // 'กตัญู'
+
+// See exactly what is wrong with a string, without changing it:
+const report = diagnoseThaiText('เร็วๆ');
+console.log(report.counts.maiYamokSpacing); // 1
+console.log(report.cleaned);                // 'เร็ว ๆ'
 ```
 
 ## API
@@ -95,11 +112,14 @@ Stage 1 — content cleanup. Runs, in order:
 4. **Unicode NFC normalization** — `e + U+0301` → `é`, Thai text stays stable.
 5. **Whitespace cleanup** — CRLF → LF, runs of spaces/tabs → one space, trimmed
    lines, at most one blank line, trimmed ends.
+6. **ไม้ยมก (ๆ) spacing** — one space on each side of the reduplication marker
+   via `fixMaiYamokSpacing` (`ดีๆ` → `ดี ๆ`, `ดีๆครับ` → `ดี ๆ ครับ`).
 
 ```ts
 cleanThaiDocxText('<p>สวัสดี   ครับ</p>'); // => 'สวัสดี ครับ'
 cleanThaiDocxText('ก​ัน');           // => 'กัน'
 cleanThaiDocxText('น้ำ &amp; ดิน');         // => 'น้ำ & ดิน'
+cleanThaiDocxText('วิ่งเร็วๆ ครับ');       // => 'วิ่งเร็ว ๆ ครับ'
 ```
 
 ### `cleanHtmlAndSpecialEntities(input: string): string`
@@ -125,12 +145,17 @@ cleanHtmlAndSpecialEntities('&lt;p&gt;ตัวอักษร&lt;/p&gt;'); // =
 
 ### `fixThaiFloatingVowels(input: string): string`
 
-Stage 2 — Thai cluster repair. Three passes:
+Stage 2 — Thai cluster repair. Five passes:
 
-1. **Re-attach** combining marks that were pushed away from their Thai base by
+1. **Compose SARA AM** that was spelled as its two-part form NIKKAHIT + SARA AA
+   (`ํ` + `า` → `ำ`). Unicode's NFC cannot do this — U+0E33 has no canonical
+   decomposition, so the pair survives normalization untouched.
+2. **Re-attach** combining marks that were pushed away from their Thai base by
    spaces (`ก ัน` → `กัน`) or zero-width characters (stripped first).
-2. **Relocate orphaned marks** that lost their base entirely (`ัน` → `นั`).
-3. **Reorder** every mark run into the canonical stacking order —
+3. **Relocate orphaned marks** that lost their base entirely (`ัน` → `นั`).
+4. **Drop duplicated marks** inside one cluster — most commonly a doubled tone
+   mark (`ดี๊๊` → `ดี๊`).
+5. **Reorder** every mark run into the canonical stacking order —
    upper vowels → lower vowels → `็` mai taikhu → tone marks `่ ้ ๊ ๋` →
    `์ ํ ๎` — using a stable sort (`ท่ี` → `ที่`, `ป๊ั` → `ปั๊`).
 
@@ -141,6 +166,9 @@ spacing character `ำ`).
 ```ts
 fixThaiFloatingVowels('พร ุ่งนี้ ฉ ัน จะ ไป ท ี่ ห้าง');
 // => 'พรุ่งนี้ ฉัน จะ ไป ที่ ห้าง'
+
+fixThaiFloatingVowels('กำ');  // => 'กำ'   (ํ + า composed)
+fixThaiFloatingVowels('ดี๊๊');   // => 'ดี๊'  (duplicate tone mark dropped)
 ```
 
 > **Note:** preposed vowels (`เ แ โ ใ ไ`) are never reordered. A consonant
@@ -170,6 +198,85 @@ fixThaiBottomVowels('กตัญญู');    // => 'กตัญญู' (unchan
 
 The repair is deliberately scoped to *bottom* vowels; chain
 `fixThaiFloatingVowels` for a complete mark repair.
+
+### `fixMaiYamokSpacing(input: string): string`
+
+Stage 2c — normalize the spacing around the reduplication marker **ไม้ยมก**
+(`ๆ`, U+0E46) to the Royal Institute convention of **one space on each side**:
+
+- `ดีๆ` → `ดี ๆ` (word glued in front of ๆ)
+- `ดีๆครับ` → `ดี ๆ ครับ` (word glued behind ๆ)
+- `ดี   ๆ` → `ดี ๆ` (excess spaces collapsed)
+
+Line breaks are never bridged (`ดี\nๆ` is left alone) and punctuation keeps its
+place (`ดี ๆ.` stays `ดี ๆ.`). Runs as the last step of
+`cleanThaiDocxText`; `fixThaiFloatingVowels` intentionally leaves spacing
+alone.
+
+```ts
+fixMaiYamokSpacing('ดีๆครับ');    // => 'ดี ๆ ครับ'
+fixMaiYamokSpacing('ดี   ๆครับ'); // => 'ดี ๆ ครับ'
+fixMaiYamokSpacing('ดี ๆ.');     // => 'ดี ๆ.' (unchanged)
+```
+
+### `diagnoseThaiText(input: string): ThaiCleanDiagnostic`
+
+Diagnosing a string — inspect text **without changing it** and get a full
+report of every category of corruption the pipeline can repair. Detection
+mirrors the repair stages, so a defect is never counted twice (`ก ัน` is one
+floating mark, not also an orphan mark; `ดี   ๆ` is excess whitespace, not a
+`ๆ`-spacing issue).
+
+```ts
+export interface ThaiCleanDiagnostic {
+  length: number;                                                       // UTF-16 length of the input
+  isClean: boolean;                                                     // true when nothing was found
+  issueCount: number;                                                   // sum of every issue's count
+  counts: Readonly<Record<ThaiDiagnosticIssueType, number>>;            // occurrences per category
+  issues: readonly ThaiDiagnosticIssue[];                               // found categories only
+  cleaned: string;                                                      // input after the full repair pipeline
+}
+
+export interface ThaiDiagnosticIssue {
+  type: ThaiDiagnosticIssueType;   // e.g. 'invisibleChars', 'separatedSaraAm', 'maiYamokSpacing'
+  message: string;                 // human-readable explanation + repair
+  count: number;                   // occurrences in the whole text
+  samples: ThaiDiagnosticSample[]; // up to 5 located examples
+}
+
+export interface ThaiDiagnosticSample {
+  index: number;   // UTF-16 position of the match
+  match: string;   // the matched text (may be invisible, e.g. '\u200B')
+  excerpt: string; // the match in context, invisible characters escaped
+}
+```
+
+`ThaiDiagnosticIssueType` covers: `htmlEntities`, `htmlTags`, `invisibleChars`,
+`controlChars`, `loneSurrogates`, `duplicateWhitespace`, `needsNfc`,
+`separatedSaraAm`, `floatingMarks`, `orphanMarks`, `duplicateMarks`,
+`stackOrderViolations` and `maiYamokSpacing`.
+
+```ts
+const report = diagnoseThaiText('สวัสดี​ครับ ดีๆ กำ');
+
+report.isClean;                // => false
+report.counts.invisibleChars;  // => 1
+report.counts.maiYamokSpacing; // => 1
+report.counts.separatedSaraAm; // => 1
+
+report.issues[0].samples[0];   // => { index: 6, match: '\u200B', excerpt: 'สวัสดี[\u200B]ครับ' }
+report.cleaned;                // => 'สวัสดีครับ ดี ๆ กำ'
+```
+
+A common pattern is to log the report and then ship the repaired text:
+
+```ts
+const report = diagnoseThaiText(input);
+if (!report.isClean) {
+  console.warn('Thai cleanup:', report.issues.map((i) => `${i.type}×${i.count}`));
+}
+const output = report.cleaned; // ready for a <w:t> node or a docx paragraph
+```
 
 ### `sanitizeOpenXmlNodes(xmlString, options?): string`
 
@@ -325,7 +432,7 @@ Project layout:
 
 ```
 .github/workflows/ci.yml   GitHub Actions CI (Node 18 & 20)
-src/index.ts               the five sanitizer stages
+src/index.ts               the sanitizer stages + diagnoseThaiText
 src/cli.ts                 command-line filter
 src/__tests__/cleaner.test.ts
 dist/                      build output (ESM + CJS + types)
