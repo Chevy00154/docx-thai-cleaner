@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -12,6 +16,7 @@ import {
   INVISIBLE_CHARS,
   sanitizeOpenXmlNodes,
 } from '../index';
+import { readPackageVersion } from '../version';
 
 describe('cleanThaiDocxText', () => {
   describe('HTML tag stripping', () => {
@@ -750,5 +755,53 @@ describe('docxThaiCleaner — namespace export', () => {
       'sanitizeOpenXmlNodes',
       'diagnoseThaiText',
     ]);
+  });
+});
+
+describe('readPackageVersion — อ่านเวอร์ชันจาก package.json', () => {
+  it('reads the real package version when started from a file inside dist/', () => {
+    // Simulate the built CLI: dist/cli.js and dist/cjs/cli.js both sit one or
+    // two levels below package.json and must report the same version.
+    expect(readPackageVersion(join(process.cwd(), 'dist', 'cli.js'))).toBe('1.1.1');
+    expect(readPackageVersion(join(process.cwd(), 'dist', 'cjs', 'cli.js'))).toBe('1.1.1');
+  });
+
+  it('reads the version when started from src/ (unbuilt dev tree)', () => {
+    expect(readPackageVersion(join(process.cwd(), 'src', 'cli.ts'))).toBe('1.1.1');
+  });
+
+  it('walks up past a nested node_modules layout (npm bin shim case)', () => {
+    const root = process.cwd();
+    const shim = join(root, 'node_modules', '.bin', 'docx-thai-cleaner');
+    expect(readPackageVersion(shim)).toBe('1.1.1');
+    void root;
+  });
+
+  it('ignores a foreign package.json that does not match the package name', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dtc-version-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'someone-else', version: '9.9.9' }));
+      // Foreign manifest is skipped, walk continues up — but /tmp has no
+      // docx-thai-cleaner package.json above it, so we get the fallback.
+      expect(readPackageVersion(join(dir, 'fake-cli.js'))).toBe('0.0.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a matching package.json placed alongside the entry file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dtc-version-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'docx-thai-cleaner', version: '4.5.6' }));
+      expect(readPackageVersion(join(dir, 'cli.js'))).toBe('4.5.6');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the fallback when the entry path and its parents have no matching package.json', () => {
+    // Non-existent file under the OS temp dir: realpath fails, walk-up from
+    // there finds no docx-thai-cleaner package.json → fallback.
+    expect(readPackageVersion(join(tmpdir(), 'definitely-missing', 'cli.js'))).toBe('0.0.0');
   });
 });

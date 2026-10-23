@@ -14,10 +14,11 @@
  * ```
  */
 import { cleanThaiDocxText, fixThaiFloatingVowels, sanitizeOpenXmlNodes } from './index.js';
+import { readPackageVersion } from './version.js';
 
 type Mode = 'clean' | 'fix' | 'sanitize';
 
-const VERSION = '1.0.0';
+const VERSION = readPackageVersion();
 
 const USAGE = `docx-thai-cleaner — Thai text sanitizer for .docx pipelines
 
